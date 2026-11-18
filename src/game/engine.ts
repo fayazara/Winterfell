@@ -1,4 +1,6 @@
 import {
+  PARTICLE_FRAG,
+  PARTICLE_VERT,
   BILLBOARD_FRAG,
   BILLBOARD_VERT,
   FLAME_FRAG,
@@ -18,13 +20,19 @@ import {
 import { MAX_PALETTE, PALETTES } from "./palettes"
 import { HAND_IMAGES, buildHandSprite, loadImage, type HandSprite } from "./handImages"
 import { SKY_URL, buildAtlas, placeProps, type Atlas, type Prop } from "./props"
-import { PRESETS, type Environment, type Preset, type Tweaks } from "./presets"
+import { GROUND, bakeAO, bakeHeights, bakeShadows, packGround } from "./groundMap"
+import { Ambience } from "./audio"
+import { DAWN_ID, NIGHT_ID, PRESETS, type Environment, type Preset, type Tweaks } from "./presets"
 import {
   CASTLE_X,
   CASTLE_Y,
   CASTLE_Z,
   PATH_END_Z,
   PATH_START_Z,
+  LAKE,
+  LAKE_FLOOR,
+  WATER_Y,
+  lakeE,
   clamp,
   lerp,
   smoothstep,
@@ -39,6 +47,10 @@ export interface Settings extends Tweaks {
   autoWalk: boolean
   /** on horseback */
   riding: boolean
+  /** BRICKLAND-style toy colour grade */
+  grade: boolean
+  /** synthesised ambient sound */
+  sound: boolean
 }
 
 export interface EngineCallbacks {
@@ -46,6 +58,12 @@ export interface EngineCallbacks {
   onAutoWalk?: (on: boolean) => void
   onPointerLock?: (locked: boolean) => void
   onRiding?: (on: boolean) => void
+  onCamp?: (on: boolean) => void
+  /** a short line of verse to show while resting, or null to clear it */
+  onVerse?: (text: string | null) => void
+  /** the engine moved to another preset on its own (night falls, dawn) */
+  onPreset?: (id: string) => void
+  onSound?: (on: boolean) => void
 }
 
 type Prog = { p: WebGLProgram; u: Map<string, WebGLUniformLocation | null> }
@@ -54,8 +72,22 @@ const EYE = 1.72
 /** eye height in the saddle */
 const EYE_RIDING = 2.55
 const easeInOut = (t: number) => t * t * (3 - 2 * t)
-/** floats per billboard instance: pos3 size2 uv4 sway2 */
-const BB_FLOATS = 11
+/** eye height sitting by the fire */
+const EYE_SITTING = 1.05
+const FIREFLIES = 180
+const EMBERS = 60
+
+/** Original verses for resting by the fire. */
+const VERSES = [
+  "Embers climb the dark —\nthe road will wait till morning,\nand so will the stones.",
+  "Fireflies drift low;\nthe horse dozes by the flame.\nNothing to be won.",
+  "Far towers, faint light.\nThe fire knows only this hour\nand asks nothing more.",
+  "Wind moves through the pines.\nI set the heavy sword down\nand listen a while.",
+  "Stars over the vale —\nhow small the castle looks now,\nhow wide the night is.",
+  "The torch burns lower.\nSomewhere an owl, then nothing.\nThe grass keeps breathing.",
+]
+/** floats per billboard instance: pos3 size2 uv4 sway2 tint1 */
+const BB_FLOATS = 12
 const FOV = (62 * Math.PI) / 180
 
 function compile(gl: WebGL2RenderingContext, vs: string, fs: string): Prog {
@@ -140,6 +172,24 @@ export class Engine {
   /** the horse standing in the world while you are on foot */
   private horseProp: Prop | null = null
   private horseTex: { tex: WebGLTexture; s: HandSprite } | null = null
+  // camping
+  private particles: Prog
+  private camping = false
+  private campT = 0
+  private campTime = 0
+  private campProp: Prop | null = null
+  private verseShown = false
+  private verseIndex = Math.floor(Math.random() * VERSES.length)
+  private dawnTimer = 0
+  /** seconds the current environment blend takes */
+  private envDuration = 2
+  // baked ground map: horizon AO + prop shadows
+  private groundTex: WebGLTexture | null = null
+  private groundAO: Uint8Array | null = null
+  private groundData: Uint8Array | null = null
+  private groundSun: number[] | null = null
+  private groundTimer = 0
+  private audio = new Ambience()
   private keys = new Set<string>()
   private fade = 0
   private looping = false
@@ -176,6 +226,7 @@ export class Engine {
     this.depthTex = gl.createTexture()
     this.fboScene = gl.createFramebuffer()
     this.billboard = compile(gl, BILLBOARD_VERT, BILLBOARD_FRAG)
+    this.particles = compile(gl, PARTICLE_VERT, PARTICLE_FRAG)
     // billboard VAO: unit quad corners + per-instance attributes
     this.bbVao = gl.createVertexArray()
     gl.bindVertexArray(this.bbVao)
@@ -187,7 +238,7 @@ export class Engine {
     this.bbBuf = gl.createBuffer()
     gl.bindBuffer(gl.ARRAY_BUFFER, this.bbBuf)
     const stride = BB_FLOATS * 4
-    const attrs: [number, number, number][] = [[1, 3, 0], [2, 2, 3], [3, 4, 5], [4, 2, 9]]
+    const attrs: [number, number, number][] = [[1, 3, 0], [2, 2, 3], [3, 4, 5], [4, 2, 9], [5, 1, 11]]
     for (const [locn, size, off] of attrs) {
       gl.enableVertexAttribArray(locn)
       gl.vertexAttribPointer(locn, size, gl.FLOAT, false, stride, off * 4)
@@ -200,11 +251,22 @@ export class Engine {
     const p = PRESETS[0]
     this.envFrom = p.env
     this.envTo = p.env
-    this.settings = { pixelHeight: 400, ...p.tweaks, autoWalk: true, riding: false }
+    this.settings = { pixelHeight: 400, ...p.tweaks, autoWalk: true, riding: false, grade: true, sound: this.audio.on }
+    queueMicrotask(() => this.cb.onSound?.(this.audio.on))
     this.parkHorse(pathX(PATH_START_Z - 7) + 2.6, PATH_START_Z - 7)
 
     this.camY = terrainHeight(this.pos.x, this.pos.z) + EYE
     this.yaw = this.pathYaw(this.pos.z)
+    // playground aid: #cam=x,z,yawDegrees starts you standing there, free-looking
+    const m = /cam=(-?[\d.]+),(-?[\d.]+)(?:,(-?[\d.]+))?/.exec(window.location.hash)
+    if (m) {
+      this.pos = { x: Number(m[1]), z: Number(m[2]) }
+      this.yaw = ((Number(m[3] ?? 0)) * Math.PI) / 180
+      this.pitch = -0.05
+      this.camY = terrainHeight(this.pos.x, this.pos.z) + EYE
+      this.settings.autoWalk = false
+      queueMicrotask(() => this.cb.onAutoWalk?.(false))
+    }
 
     this.resize()
     window.addEventListener("resize", this.resize)
@@ -243,9 +305,9 @@ export class Engine {
         this.atlas = atlas
         this.atlasTex = tex
         this.props = placeProps()
-        this.bbData = new Float32Array((this.props.length + 1) * BB_FLOATS)
-        this.propOrder = new Int32Array(this.props.length + 1)
-        this.propDist = new Float32Array(this.props.length + 1)
+        this.bbData = new Float32Array((this.props.length + 2) * BB_FLOATS)
+        this.propOrder = new Int32Array(this.props.length + 2)
+        this.propDist = new Float32Array(this.props.length + 2)
       })
       .catch((err) => console.warn("world props unavailable, using procedural trees", err))
     loadImage(SKY_URL)
@@ -264,10 +326,16 @@ export class Engine {
       .catch((err) => console.warn("painted sky unavailable", err))
     this.last = performance.now()
     this.raf = requestAnimationFrame(this.frame)
+    // ground occlusion takes ~100 ms of CPU; do it after the first frame
+    setTimeout(() => {
+      if (this.destroyed) return
+      this.groundAO = bakeAO(bakeHeights())
+    }, 50)
   }
 
   destroy() {
     this.destroyed = true
+    this.audio.dispose()
     cancelAnimationFrame(this.raf)
     window.removeEventListener("resize", this.resize)
     window.removeEventListener("keydown", this.onKeyDown)
@@ -281,9 +349,52 @@ export class Engine {
   }
 
   setPreset(preset: Preset) {
+    this.blendTo(preset.env, 2)
+  }
+
+  private blendTo(env: Environment, seconds: number) {
     this.envFrom = this.currentEnv()
-    this.envTo = preset.env
+    this.envTo = env
     this.envT = 0
+    this.envDuration = seconds
+  }
+
+  /** Light a fire and sit; night falls while you rest. C again to rise at dawn. */
+  private setCamp(on: boolean) {
+    if (on === this.camping || this.looping) return
+    if (on) {
+      if (this.settings.riding) this.setRiding(false)
+      if (this.settings.autoWalk) this.setAutoWalk(false)
+      const fx = Math.sin(this.yaw)
+      const fz = -Math.cos(this.yaw)
+      const x = this.pos.x + fx * 2.4
+      const z = this.pos.z + fz * 2.4
+      this.campProp = { x, y: terrainHeight(x, z) - 0.1, z, h: 1.1, key: "campfire", sway: 0, phase: 0, glow: true }
+      // the horse wanders over to stand by the camp
+      const rx = Math.cos(this.yaw)
+      const rz = Math.sin(this.yaw)
+      this.parkHorse(this.pos.x + rx * 3.6 + fx * 1.5, this.pos.z + rz * 3.6 + fz * 1.5)
+      this.camping = true
+      this.campTime = 0
+      this.verseShown = false
+      this.blendTo(PRESETS.find((p) => p.id === NIGHT_ID)!.env, 14)
+      this.cb.onPreset?.(NIGHT_ID)
+    } else {
+      this.camping = false
+      this.cb.onVerse?.("Dawn comes up over the valley.\nThe road is still there.")
+      this.dawnTimer = 5
+      this.blendTo(PRESETS.find((p) => p.id === DAWN_ID)!.env, 6)
+      this.cb.onPreset?.(DAWN_ID)
+    }
+    this.cb.onCamp?.(on)
+  }
+
+  get isCamping() {
+    return this.camping
+  }
+
+  toggleCamp() {
+    this.setCamp(!this.camping)
   }
 
   setSettings(s: Partial<Settings>) {
@@ -291,6 +402,10 @@ export class Engine {
     this.settings = { ...this.settings, ...s }
     if (s.autoWalk === true) this.lookOffset = { yaw: 0, pitch: 0 }
     if (s.riding !== undefined) this.applyRiding(s.riding)
+    if (s.sound !== undefined) {
+      this.audio.setEnabled(s.sound)
+      if (s.sound) this.audio.unlock()
+    }
     if (this.settings.pixelHeight !== prevH) this.resize()
   }
 
@@ -303,12 +418,20 @@ export class Engine {
       if (this.settings.autoWalk) this.setAutoWalk(false)
     }
     if (e.code === "KeyR") this.setAutoWalk(!this.settings.autoWalk)
-    if (e.code === "KeyH") this.setRiding(!this.settings.riding)
+    if (e.code === "KeyH" && !this.camping) this.setRiding(!this.settings.riding)
+    if (e.code === "KeyC") this.setCamp(!this.camping)
+    if (e.code === "KeyM") {
+      this.audio.setEnabled(!this.audio.on)
+      this.settings = { ...this.settings, sound: this.audio.on }
+      this.cb.onSound?.(this.audio.on)
+    }
+    this.audio.unlock()
     this.keys.add(e.code)
   }
   private onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code)
   private onBlur = () => this.keys.clear()
   private onClick = () => {
+    this.audio.unlock()
     if (document.pointerLockElement !== this.canvas) this.canvas.requestPointerLock?.()
   }
   private dragging: { x: number; y: number; id: number } | null = null
@@ -373,8 +496,34 @@ export class Engine {
     }
   }
 
+  /** (Re)bake prop shadows when the sun has moved; upload with the AO. */
+  private refreshGround() {
+    if (!this.groundAO || !this.props.length) return
+    const sun = normalize(this.currentEnv().sunDir)
+    const moved = !this.groundSun || Math.hypot(sun[0] - this.groundSun[0], sun[1] - this.groundSun[1], sun[2] - this.groundSun[2]) > 0.015
+    if (!moved) return
+    this.groundSun = sun
+    const shadowCasters = this.horseProp ? [...this.props, this.horseProp] : this.props
+    const sh = bakeShadows(shadowCasters, sun as [number, number, number])
+    this.groundData = packGround(this.groundAO, sh, this.groundData ?? undefined)
+    const gl = this.gl
+    if (!this.groundTex) {
+      this.groundTex = gl.createTexture()
+      gl.bindTexture(gl.TEXTURE_2D, this.groundTex)
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, GROUND.w, GROUND.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.groundData)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+    } else {
+      gl.bindTexture(gl.TEXTURE_2D, this.groundTex)
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, GROUND.w, GROUND.h, gl.RGBA, gl.UNSIGNED_BYTE, this.groundData)
+    }
+  }
+
   private parkHorse(x: number, z: number) {
     this.horseProp = { x, y: terrainHeight(x, z) - 0.15, z, h: 2.5, key: "horse", sway: 0, phase: 0 }
+    this.groundSun = null
   }
 
   // ---------- sizing ----------
@@ -475,14 +624,34 @@ export class Engine {
 
   private update(dt: number) {
     this.time += dt
-    this.envT = Math.min(1, this.envT + dt / 2)
+    this.envT = Math.min(1, this.envT + dt / this.envDuration)
     const s = this.settings
     let speed = 0
 
+    this.groundTimer -= dt
+    if (this.groundTimer <= 0) {
+      this.groundTimer = 0.35
+      this.refreshGround()
+    }
     const riding = s.riding
     this.mountT = clamp(this.mountT + (riding ? dt : -dt) / 0.9, 0, 1)
+    this.campT = clamp(this.campT + (this.camping ? dt : -dt) / 1.6, 0, 1)
+    if (!this.camping && this.campT === 0) this.campProp = null
+    if (this.dawnTimer > 0) {
+      this.dawnTimer -= dt
+      if (this.dawnTimer <= 0) this.cb.onVerse?.(null)
+    }
 
-    if (s.autoWalk) {
+    if (this.camping) {
+      // sit, look into the fire for a moment, then the view is yours
+      this.campTime += dt
+      if (this.campTime < 2) this.pitch += (-0.16 - this.pitch) * (1 - Math.exp(-dt * 3))
+      if (!this.verseShown && this.campTime > 4) {
+        this.verseShown = true
+        this.cb.onVerse?.(VERSES[this.verseIndex++ % VERSES.length])
+      }
+      if (this.verseShown && this.campTime > 16 && this.campTime - dt <= 16) this.cb.onVerse?.(null)
+    } else if (s.autoWalk) {
       if (riding) {
         this.rideSpeed += (4.2 - this.rideSpeed) * (1 - Math.exp(-dt * 1.5))
         speed = this.rideSpeed
@@ -502,6 +671,8 @@ export class Engine {
         this.lookOffset.pitch -= this.lookOffset.pitch * k
       }
     } else if (riding) {
+      const px = this.pos.x
+      const pz = this.pos.z
       // the horse has weight: throttle and turning ease in and out
       const fwd = (this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0) - (this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0)
       const turn =
@@ -515,6 +686,11 @@ export class Engine {
       this.yaw += this.turnRate * dt
       this.pos.x = clamp(this.pos.x + Math.sin(this.yaw) * this.rideSpeed * dt, -160, 160)
       this.pos.z = clamp(this.pos.z - Math.cos(this.yaw) * this.rideSpeed * dt, -128, 90)
+      if (lakeE(this.pos.x, this.pos.z) < 1.02) {
+        this.pos.x = px
+        this.pos.z = pz
+        this.rideSpeed *= 0.3
+      }
       speed = Math.abs(this.rideSpeed)
     } else {
       const fwd = (this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0) - (this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0)
@@ -524,6 +700,8 @@ export class Engine {
       const run = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") ? 2.2 : 1
       const len = Math.hypot(fwd, str)
       if (len > 0) {
+        const px = this.pos.x
+        const pz = this.pos.z
         speed = 2.2 * run
         const fx = Math.sin(this.yaw)
         const fz = -Math.cos(this.yaw)
@@ -533,6 +711,10 @@ export class Engine {
         this.pos.z += ((fz * fwd + rz * str) / len) * speed * dt
         this.pos.x = clamp(this.pos.x, -160, 160)
         this.pos.z = clamp(this.pos.z, -128, 90)
+        if (lakeE(this.pos.x, this.pos.z) < 1.02) {
+          this.pos.x = px
+          this.pos.z = pz
+        }
       }
     }
 
@@ -559,7 +741,7 @@ export class Engine {
       this.bobPhase += speed * dt * 2.3
     }
     const ground = terrainHeight(this.pos.x, this.pos.z)
-    const eye = lerp(EYE, EYE_RIDING, easeInOut(this.mountT))
+    const eye = lerp(lerp(EYE, EYE_RIDING, easeInOut(this.mountT)), EYE_SITTING, easeInOut(this.campT))
     this.camY += (ground + eye - this.camY) * (1 - Math.exp(-dt * 10))
   }
 
@@ -580,6 +762,17 @@ export class Engine {
     this.last = now
     this.update(dt)
     this.render()
+    const env = this.currentEnv()
+    this.audio.update(dt, {
+      speed: this.settings.riding ? Math.abs(this.rideSpeed) : this.moving * (this.settings.autoWalk ? 1.5 : 2.2),
+      riding: this.settings.riding && this.mountT > 0.5,
+      gallop: this.gallop,
+      ridePhase: this.ridePhase,
+      bobPhase: this.bobPhase,
+      camping: this.camping,
+      night: env.stars,
+      wind: this.settings.wind,
+    })
     this.fpsAcc.t += dt
     this.fpsAcc.n++
     if (this.fpsAcc.t > 0.5) {
@@ -593,8 +786,9 @@ export class Engine {
   private fillBillboards(cam: number[], fwd: number[]) {
     const atlas = this.atlas!
     const props = this.props
-    const total = props.length + (this.horseProp ? 1 : 0)
-    const get = (i: number) => (i < props.length ? props[i] : this.horseProp!)
+    const extras = [this.horseProp, this.campProp].filter((p): p is Prop => p !== null)
+    const total = props.length + extras.length
+    const get = (i: number) => (i < props.length ? props[i] : extras[i - props.length])
     let n = 0
     for (let i = 0; i < total; i++) {
       const p = get(i)
@@ -624,7 +818,8 @@ export class Engine {
       out[o + 7] = e.u1
       out[o + 8] = e.v1
       out[o + 9] = p.sway
-      out[o + 10] = p.phase
+      out[o + 10] = p.glow ? -1 : p.phase
+      out[o + 11] = p.tint ?? 0
     }
     return n
   }
@@ -638,6 +833,7 @@ export class Engine {
     const torchColor: [number, number, number] = [1.0, 0.6, 0.28]
 
     // camera basis
+    const ct = easeInOut(this.campT)
     const mt = easeInOut(this.mountT)
     const rp = this.ridePhase
     const gaitAmp = lerp(0.03, 0.1, this.gallop) * this.moving
@@ -690,6 +886,11 @@ export class Engine {
       flameX = torchX + Math.round((TORCH_FLAME_ANCHOR.x - FLAME_SIZE.w / 2) * ss)
       flameY = torchY + Math.round((TORCH_FLAME_ANCHOR.y + 4 - FLAME_SIZE.h) * ss)
     }
+    // sitting by the fire: torch planted, sword laid down
+    const away = Math.round(ct * h * 0.95)
+    torchY += away
+    swordY += away
+    flameY += away
     const flameCx = flameX + (FLAME_SIZE.w * fs) / 2
     const flameCy = flameY + FLAME_SIZE.h * fs * 0.7
 
@@ -699,14 +900,23 @@ export class Engine {
     const aspect = w / h
     const dir = [0, 1, 2].map((i) => fwd[i] + right[i] * nx * tanHalf * aspect + up[i] * ny * tanHalf)
     const dl = Math.hypot(dir[0], dir[1], dir[2])
-    const torchPos = [0, 1, 2].map((i) => cam[i] + (dir[i] / dl) * 0.7)
+    const handTorch = [0, 1, 2].map((i) => cam[i] + (dir[i] / dl) * 0.7)
+    // at camp the campfire takes over as the light: bigger, lower, its own flicker
+    const fire = this.campProp
+    const firePos = fire ? [fire.x, fire.y + 0.55, fire.z] : handTorch
+    const torchPos = [0, 1, 2].map((i) => lerp(handTorch[i], firePos[i], fire ? ct : 0))
+    const fireFlicker = 0.85 + 0.1 * Math.sin(this.time * 9.3) + 0.12 * (vnoise(this.time * 4.1, 7.7) - 0.5)
+    const lightAmt = lerp(torch, fireFlicker * 0.95, fire ? ct : 0)
+    const torchWorld = lerp(env.torchWorld, 1, ct)
 
     // hands take the scene's light: sun + sky, slightly lifted so they read
     const tint = [0, 1, 2].map((i) => env.sunColor[i] * 0.62 + env.ambient[i] * 0.55)
     const lum = tint[0] * 0.3 + tint[1] * 0.59 + tint[2] * 0.11 || 1
-    const handLight = tint.map((c) => lerp(1, c / lum, 0.35) * (anchor ? 0.95 : 1.15))
+    // ~0.8 is the light level the painted art was made for; night darkens it
+    const dayness = Math.min(1.1, lum / 0.8)
+    const handLight = tint.map((c) => lerp(1, c / lum, 0.35) * (anchor ? 0.95 : 1.15) * Math.max(0.4, dayness))
     // painted props are drawn for the sunset look; other moods tint them
-    const propTint = tint.map((c, i) => lerp(1, c / lum, 0.5) * lerp(0.92, 1, env.paintedSky) + (i === 2 ? 0.02 : 0))
+    const propTint = tint.map((c, i) => (lerp(1, c / lum, 0.5) * lerp(0.92, 1, env.paintedSky) + (i === 2 ? 0.02 : 0)) * dayness)
 
     const ground0 = terrainHeight(this.pos.x, this.pos.z)
 
@@ -726,12 +936,13 @@ export class Engine {
     gl.uniform1f(loc(gl, P, "uTanHalfFov"), tanHalf)
     gl.uniform3fv(loc(gl, P, "uTorchPos"), torchPos)
     gl.uniform3fv(loc(gl, P, "uTorchColor"), torchColor)
-    gl.uniform1f(loc(gl, P, "uTorch"), torch)
+    gl.uniform1f(loc(gl, P, "uTorch"), lightAmt)
     gl.uniform1f(loc(gl, P, "uFog"), s.fog)
     gl.uniform1f(loc(gl, P, "uMist"), s.mist)
     gl.uniform1f(loc(gl, P, "uWind"), s.wind)
     gl.uniform1f(loc(gl, P, "uWindowGlow"), env.windowGlow)
-    gl.uniform1f(loc(gl, P, "uTorchWorld"), env.torchWorld)
+    gl.uniform1f(loc(gl, P, "uTorchWorld"), torchWorld)
+    gl.uniform1f(loc(gl, P, "uStars"), env.stars)
     gl.uniform1f(loc(gl, P, "uCloudCover"), env.cloudCover)
     gl.uniform1f(loc(gl, P, "uCloudBand"), env.cloudBand)
     gl.uniform1f(loc(gl, P, "uGround"), ground0)
@@ -751,6 +962,14 @@ export class Engine {
     gl.uniform1f(loc(gl, P, "uPainted"), painted)
     gl.uniform1f(loc(gl, P, "uSdfProps"), propsReady ? 0 : 1)
     gl.uniform1f(loc(gl, P, "uSdfCastle"), propsReady ? 0 : 1)
+    gl.uniform4f(loc(gl, P, "uLake"), LAKE.x, LAKE.z, LAKE.rx, LAKE.rz)
+    gl.uniform1f(loc(gl, P, "uWaterY"), WATER_Y)
+    gl.uniform1f(loc(gl, P, "uLakeFloor"), LAKE_FLOOR)
+    gl.uniform4f(loc(gl, P, "uGroundRect"), GROUND.x0, GROUND.z0, GROUND.w, GROUND.h)
+    gl.uniform1f(loc(gl, P, "uGroundOn"), this.groundTex ? 1 : 0)
+    gl.activeTexture(gl.TEXTURE2)
+    gl.bindTexture(gl.TEXTURE_2D, this.groundTex)
+    gl.uniform1i(loc(gl, P, "uGroundMap"), 2)
     gl.activeTexture(gl.TEXTURE0)
     gl.bindTexture(gl.TEXTURE_2D, this.skyTex)
     gl.uniform1i(loc(gl, P, "uSky"), 0)
@@ -789,9 +1008,42 @@ export class Engine {
       gl.uniform3fv(loc(gl, P, "uSunColor"), env.sunColor)
       gl.uniform3fv(loc(gl, P, "uSunDir"), normalize(env.sunDir))
       gl.uniform3fv(loc(gl, P, "uCloudLit"), env.cloudLit)
+      gl.uniform3fv(loc(gl, P, "uTorchPos"), torchPos)
+      gl.uniform3fv(loc(gl, P, "uTorchColor"), torchColor)
+      gl.uniform1f(loc(gl, P, "uTorch"), lightAmt)
+      gl.uniform1f(loc(gl, P, "uTorchWorld"), torchWorld)
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n)
       gl.activeTexture(gl.TEXTURE0)
       gl.bindVertexArray(this.vao)
+    }
+
+    // ---- pass 1c: fireflies + campfire embers (additive points) ----
+    const embers = fire ? ct : 0
+    if (env.fireflies > 0.01 || embers > 0.01) {
+      P = this.particles
+      gl.useProgram(P.p)
+      gl.activeTexture(gl.TEXTURE1)
+      gl.bindTexture(gl.TEXTURE_2D, this.depthTex)
+      gl.uniform1i(loc(gl, P, "uDepth"), 1)
+      gl.uniform2f(loc(gl, P, "uRes"), w, h)
+      gl.uniform3fv(loc(gl, P, "uCamPos"), cam)
+      gl.uniform3fv(loc(gl, P, "uCamRight"), right)
+      gl.uniform3fv(loc(gl, P, "uCamUp"), up)
+      gl.uniform3fv(loc(gl, P, "uCamFwd"), fwd)
+      gl.uniform3fv(loc(gl, P, "uFirePos"), fire ? [fire.x, fire.y, fire.z] : cam)
+      gl.uniform1f(loc(gl, P, "uTanHalfFov"), tanHalf)
+      gl.uniform1f(loc(gl, P, "uAspect"), w / h)
+      gl.uniform1f(loc(gl, P, "uTime"), this.time)
+      gl.uniform1f(loc(gl, P, "uGround"), ground0)
+      gl.uniform1f(loc(gl, P, "uCount"), FIREFLIES)
+      gl.uniform1f(loc(gl, P, "uFireflies"), env.fireflies)
+      gl.uniform1f(loc(gl, P, "uEmbers"), embers)
+      gl.uniform1f(loc(gl, P, "uWind"), s.wind)
+      gl.enable(gl.BLEND)
+      gl.blendFunc(gl.ONE, gl.ONE)
+      gl.drawArrays(gl.POINTS, 0, FIREFLIES + (embers > 0.01 ? EMBERS : 0))
+      gl.disable(gl.BLEND)
+      gl.activeTexture(gl.TEXTURE0)
     }
 
     // ---- pass 2: hands + flame ----
@@ -822,8 +1074,8 @@ export class Engine {
       const hy = h - hs.h + Math.round(h * 0.06 + (1 - mt) * h * 0.85 + Math.sin(rp * 2 + 0.6) * gaitPx)
       drawSprite(this.horseTex, hx, hy)
     }
-    if (mt < 0.99) drawSprite(this.swordTex, swordX, swordY + Math.round(mt * h * 0.9))
-    drawSprite(this.torchTex, torchX, torchY)
+    if (mt < 0.99 && ct < 0.99) drawSprite(this.swordTex, swordX, swordY + Math.round(mt * h * 0.9))
+    if (ct < 0.99) drawSprite(this.torchTex, torchX, torchY)
     P = this.flame
     gl.useProgram(P.p)
     gl.uniform4fv(loc(gl, P, "uRect"), toGl(flameX, flameY, FLAME_SIZE.w * fs, FLAME_SIZE.h * fs))
@@ -833,7 +1085,7 @@ export class Engine {
     gl.uniform1f(loc(gl, P, "uTime"), this.time)
     gl.uniform1f(loc(gl, P, "uWind"), s.wind)
     gl.uniform1f(loc(gl, P, "uTorch"), torch)
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+    if (ct < 0.99) gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
 
     // ---- pass 3: palette + dither + upscale ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, null)
@@ -847,6 +1099,7 @@ export class Engine {
     gl.uniform2f(loc(gl, P, "uOffset"), this.low.ox, this.low.oy)
     gl.uniform1f(loc(gl, P, "uScale"), scale)
     gl.uniform1f(loc(gl, P, "uDither"), s.dither)
+    gl.uniform1f(loc(gl, P, "uGrade"), s.grade ? 1 : 0)
     gl.uniform1f(loc(gl, P, "uFade"), this.fade)
     const pal = s.palette !== "off" ? PALETTES[s.palette] : undefined
     gl.uniform1i(loc(gl, P, "uUsePal"), pal ? 1 : 0)

@@ -4,14 +4,14 @@
  * placement is deterministic so the valley looks the same every visit.
  */
 import { contentBox, loadImage } from "./handImages"
-import { CASTLE_X, CASTLE_Y, CASTLE_Z, hash12, lerp, pathX, smoothstep, terrainHeight } from "./world"
+import { CASTLE_X, CASTLE_Y, CASTLE_Z, LAKE, WATER_Y, hash12, lakeE, lerp, pathX, smoothstep, terrainHeight } from "./world"
 
 const BASE = "/sprites/world/"
 
 export const PROP_KEYS = [
   "pine_0", "pine_1", "pine_2", "tree_0", "tree_1",
   "bush_0", "bush_1", "bush_2", "rock_0", "rock_1",
-  "cottage_0", "cottage_1", "castle", "horse",
+  "cottage_0", "cottage_1", "castle", "horse", "campfire", "reeds",
 ] as const
 export type PropKey = (typeof PROP_KEYS)[number]
 
@@ -34,7 +34,12 @@ export interface Atlas {
 const ATLAS = 2048
 
 export async function buildAtlas(): Promise<Atlas> {
-  const url = (k: PropKey) => (k === "horse" ? "/sprites/library/creatures/horse_brown.png" : `${BASE}${k}.png`)
+  const LIB: Partial<Record<PropKey, string>> = {
+    horse: "/sprites/library/creatures/horse_brown.png",
+    campfire: "/sprites/library/props/campfire.png",
+    reeds: "/sprites/library/nature/tall_grass.png",
+  }
+  const url = (k: PropKey) => LIB[k] ?? `${BASE}${k}.png`
   const imgs = await Promise.all(PROP_KEYS.map((k) => loadImage(url(k))))
   const canvas = document.createElement("canvas")
   canvas.width = ATLAS
@@ -78,6 +83,10 @@ export interface Prop {
   /** how far the top sways in the wind (m) */
   sway: number
   phase: number
+  /** self-lit (a campfire): ignores scene light and flickers */
+  glow?: boolean
+  /** per-instance colour variation, -1..1 (cooler/darker .. warmer/lighter) */
+  tint?: number
 }
 
 const pick = <T,>(arr: readonly T[], r: number) => arr[Math.min(arr.length - 1, Math.floor(r * arr.length))]
@@ -85,7 +94,8 @@ const pick = <T,>(arr: readonly T[], r: number) => arr[Math.min(arr.length - 1, 
 /** Scatter props over the valley. Rules mirror the old SDF forest. */
 export function placeProps(): Prop[] {
   const props: Prop[] = []
-  const nearCastle = (x: number, z: number, r: number) => Math.hypot(x - CASTLE_X, z - CASTLE_Z) < r
+  const nearCastle = (x: number, z: number, r: number) =>
+    Math.hypot(x - CASTLE_X, z - CASTLE_Z) < r || lakeE(x, z) < 1.12
   const ground = (x: number, z: number) => terrainHeight(x, z) - 0.35
 
   // trees: sparse meadows by the road, forest on the valley walls
@@ -108,6 +118,7 @@ export function placeProps(): Prop[] {
         key: pine ? pick(["pine_0", "pine_1", "pine_2"] as const, kind / 0.6) : pick(["tree_0", "tree_1"] as const, (kind - 0.6) / 0.4),
         sway: pine ? 0.25 : 0.35,
         phase: r * 40,
+        tint: hash12(i + 33.3, j + 12.7) * 2 - 1,
       })
     }
 
@@ -126,6 +137,7 @@ export function placeProps(): Prop[] {
         x, y: ground(x, z) + 0.1, z, h: 0.9 + (r - 0.7) * 2.5,
         key: pick(["bush_0", "bush_1", "bush_2"] as const, hash12(i + 9, j + 9)),
         sway: 0.08, phase: r * 30,
+        tint: hash12(i + 2.2, j + 8.8) * 2 - 1,
       })
     }
 
@@ -165,6 +177,17 @@ export function placeProps(): Prop[] {
         sway: 0, phase: 0,
       })
     }
+
+  // reeds along the lake shore
+  for (let k = 0; k < 46; k++) {
+    const a = (k / 46) * Math.PI * 2 + (hash12(k, 4.4) - 0.5) * 0.12
+    const e = 0.97 + hash12(k, 9.1) * 0.14
+    const x = LAKE.x + Math.cos(a) * LAKE.rx * e
+    const z = LAKE.z + Math.sin(a) * LAKE.rz * e
+    const y = terrainHeight(x, z)
+    if (y < WATER_Y - 0.3) continue
+    props.push({ x, y: Math.max(y, WATER_Y) - 0.15, z, h: 1.1 + hash12(k, 2.7) * 0.8, key: "reeds", sway: 0.12, phase: k * 1.7, tint: hash12(k, 6.6) * 2 - 1 })
+  }
 
   // the castle on its crag
   props.push({ x: CASTLE_X, y: CASTLE_Y - 16, z: CASTLE_Z, h: 128, key: "castle", sway: 0, phase: 0 })

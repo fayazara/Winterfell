@@ -42,6 +42,8 @@ const VIOLET = [
   "#8a5cc8", "#a878d8", "#c49ae6",
   "#5a2060", "#8a2a70", "#b83a7a", "#e0548a", "#f27aa0", "#f8a0b4", "#fcc8cc",
   "#f89a6a", "#fcc070", "#f8e07a", "#fff4b0",
+  // golden fire yellows, so flames do not snap to green
+  "#f0b030", "#f8d050",
   "#24305a", "#34488a", "#4a62b0", "#6a86cc", "#9ab0e0",
   "#0e2420", "#143428", "#1c4a30", "#2a6236", "#3e7a3a", "#5a9440", "#80ac44",
   "#a8c450", "#d0d860",

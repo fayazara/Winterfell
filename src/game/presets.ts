@@ -24,6 +24,10 @@ export interface Environment {
   cel: number
   /** 1 = use the painted sunset sky panorama */
   paintedSky: number
+  /** star field brightness */
+  stars: number
+  /** how many fireflies are out (0..1) */
+  fireflies: number
 }
 
 export interface Tweaks {
@@ -71,6 +75,8 @@ export const PRESETS: Preset[] = [
       windowGlow: 0.7,
       cel: 1,
       paintedSky: 1,
+      stars: 0,
+      fireflies: 0.45,
     },
     tweaks: { fog: 0.0042, mist: 0.15, torch: 1, wind: 0.5, dither: 0.15, palette: "violet", pixelHeight: 280 },
   },
@@ -89,6 +95,8 @@ export const PRESETS: Preset[] = [
       cloudHi: hexToRgb("#d6d0ea"),
       cel: 0,
       paintedSky: 0,
+      stars: 0,
+      fireflies: 0.1,
       cloudShade: hexToRgb("#666498"),
       cloudCover: 0.7,
       cloudBand: 0.5,
@@ -112,6 +120,8 @@ export const PRESETS: Preset[] = [
       cloudHi: hexToRgb("#f4f2f8"),
       cel: 0,
       paintedSky: 0,
+      stars: 0,
+      fireflies: 0,
       cloudShade: hexToRgb("#98a0c8"),
       cloudCover: 0.42,
       cloudBand: 0.3,
@@ -135,6 +145,8 @@ export const PRESETS: Preset[] = [
       cloudHi: hexToRgb("#ffd2a2"),
       cel: 0,
       paintedSky: 0,
+      stars: 0,
+      fireflies: 0.3,
       cloudShade: hexToRgb("#86688c"),
       cloudCover: 0.5,
       cloudBand: 0.45,
@@ -158,6 +170,8 @@ export const PRESETS: Preset[] = [
       cloudHi: hexToRgb("#f0f0f8"),
       cel: 0,
       paintedSky: 0,
+      stars: 0,
+      fireflies: 0,
       cloudShade: hexToRgb("#a0a4c4"),
       cloudCover: 0.3,
       cloudBand: 0.8,
@@ -166,4 +180,33 @@ export const PRESETS: Preset[] = [
     },
     tweaks: { fog: 0.0055, mist: 0.7, torch: 1, wind: 0.6, dither: 1, palette: "painterly" },
   },
+  {
+    id: "starlit",
+    name: "Starlit Camp",
+    blurb: "Night in the valley. Fireflies, embers, and nowhere you need to be.",
+    env: {
+      skyTop: hexToRgb("#05071a"),
+      horizon: hexToRgb("#1e2450"),
+      sunColor: hexToRgb("#4a5aa0"),
+      sunDir: norm([-0.35, 0.55, -0.7]),
+      ambient: hexToRgb("#1a1e48"),
+      haze: hexToRgb("#161a3c"),
+      cloudLit: hexToRgb("#363a68"),
+      cloudHi: hexToRgb("#4a4e80"),
+      cloudShade: hexToRgb("#12142c"),
+      cloudCover: 0.28,
+      cloudBand: 0.15,
+      torchWorld: 1,
+      windowGlow: 1.5,
+      cel: 1,
+      paintedSky: 0,
+      stars: 1,
+      fireflies: 1,
+    },
+    tweaks: { fog: 0.0045, mist: 0.25, torch: 1, wind: 0.35, dither: 0.2, palette: "violet", pixelHeight: 280 },
+  },
 ]
+
+/** Presets the camp cycles through: night falls while you rest, dawn when you rise. */
+export const NIGHT_ID = "starlit"
+export const DAWN_ID = "morningmist"

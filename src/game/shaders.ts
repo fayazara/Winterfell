@@ -71,6 +71,13 @@ uniform sampler2D uSky;
 uniform float uPainted;    // 1 = painted sky panorama + painted props
 uniform float uSdfProps;   // 1 = procedural trees/cottages (fallback)
 uniform float uSdfCastle;  // 1 = procedural castle (fallback)
+uniform float uStars;
+uniform vec4 uLake;          // lake centre xz, radii
+uniform float uWaterY;
+uniform float uLakeFloor;
+uniform sampler2D uGroundMap; // R = horizon AO, G = baked prop shadows
+uniform vec4 uGroundRect;     // x0, z0, width, depth (m)
+uniform float uGroundOn;
 
 ${COMMON}
 
@@ -93,6 +100,7 @@ float terrain(vec2 p){
   h += smoothstep(20., 150., d) * (30. + 25. * vnoise(p * 0.012));
   float m = 1. - smoothstep(1.5, 4., d);
   if (m > 0.) h = mix(h, terrainBase(vec2(px, p.y)) - 0.2, m);
+  h = mix(h, uLakeFloor, 1. - smoothstep(.6, 1.25, length((p - uLake.xy) / uLake.zw)));
   h += 16. * smoothstep(-50., 40., p.y);
   float far = smoothstep(-240., -420., p.y) * (1. - uPainted);
   if (far > 0.) h += far * (50. + 170. * ridged(p * 0.005));
@@ -304,6 +312,19 @@ vec3 sky(vec3 rd){
   float az = atan(rd.x, -rd.z);
   float m = .03 + .05 * fbm4(vec2(az * 2.2, 3.1));
   if (rd.y < m) col = mix(col, mix(uHaze, uHorizon, .5), .7);
+  // stars, behind thin cloud
+  if (uStars > 0. && rd.y > .03){
+    vec3 sp = floor(rd * 210.);
+    float h = hash13(sp);
+    if (h > .9955){
+      float tw = .55 + .45 * sin(uTime * (1.3 + h * 37.) + h * 90.);
+      float big = h > .9992 ? 1.7 : .75;
+      col += vec3(.85, .88, 1.) * tw * big * uStars * smoothstep(.03, .25, rd.y);
+    }
+    // a faint milky band
+    float mband = exp(-pow((rd.y - .55 - .25 * sin(az * 1.3)) / .12, 2.));
+    col += vec3(.18, .16, .32) * mband * fbm2(vec2(az * 6., rd.y * 20.)) * uStars;
+  }
   if (rd.y < 0.) col = uHaze;
   if (uPainted > 0.){
     // panorama spans 120 degrees of azimuth, mirrored beyond that
@@ -348,6 +369,36 @@ vec3 torchScatter(vec3 ro, vec3 rd, float tEnd){
   return uTorchColor * uTorch * uTorchWorld * min(res, 6.) * .004;
 }
 
+// ---------- stylised lake (after BRICKLAND's liquid material) ----------
+vec3 shadeWater(vec3 ro, vec3 rd, float tw){
+  vec3 p = ro + rd * tw;
+  float depth = uWaterY - terrain(p.xz);
+  float ft = uTime * .35;
+  vec2 q = p.xz * .16;
+  vec2 warp = vec2(sin(p.z * 1.1 + ft * 2.), cos(p.x * 1.1 - ft * 1.7)) * .18;
+  float n1 = vnoise(q + vec2(ft * .5, ft * .25) + warp);
+  float n2 = vnoise(q * 2.4 - vec2(ft * .35, -ft * .45));
+  // three flat tones, deeper water darker
+  float tone = n1 * .6 + n2 * .4 - clamp(depth, 0., 4.) * .07;
+  vec3 dark = vec3(.10, .17, .42), mid = vec3(.18, .33, .66), light = vec3(.36, .56, .86);
+  vec3 wc = tone < .38 ? dark : tone < .56 ? mid : light;
+  wc *= uAmbient * 1.15 + uSunColor * .55;
+  // the sky (and painted mountains) mirrored, stronger at grazing angles
+  vec3 rr = reflect(rd, vec3(0., 1., 0.));
+  float fres = .12 + .75 * pow(1. - max(-rd.y, 0.), 6.);
+  wc = mix(wc, sky(rr), fres * .32);
+  // sun glints on ripple crests
+  wc += uSunColor * pow(max(dot(rr, uSunDir), 0.), 90.) * step(.6, n2) * 1.4;
+  // lapping foam at the shore
+  float foamLine = .1 + .06 * sin(uTime * 1.3 + n1 * 7.);
+  if (depth < foamLine) wc = mix(wc, vec3(.95, .97, 1.) * (uAmbient * .6 + uSunColor * .9), .85);
+  vec3 L = uTorchPos - p;
+  wc += uTorchColor * uTorch * uTorchWorld / (1. + dot(L, L) * .1) * .25;
+  float fogAmt = 1. - exp(-tw * uFog);
+  vec3 hz = mix(uHaze, uHorizon, smoothstep(200., 800., tw) * .5);
+  return mix(wc, hz, fogAmt);
+}
+
 float bayer4(vec2 p){
   ivec2 q = ivec2(mod(p, 4.));
   int i = q.y * 4 + q.x;
@@ -376,7 +427,20 @@ void main(){
   vec3 col;
   float tEnd = hit ? t : TMAX;
 
-  if (hit){
+  // does the ray meet the lake's surface before the ground?
+  float tw = -1.;
+  if (rd.y < 0.){
+    float tt = (uWaterY - ro.y) / rd.y;
+    if (tt > 0. && (!hit || tt < t)){
+      vec2 e2 = ((ro + rd * tt).xz - uLake.xy) / uLake.zw;
+      if (dot(e2, e2) < 1.5) tw = tt;
+    }
+  }
+
+  if (tw > 0.){
+    tEnd = tw;
+    col = shadeWater(ro, rd, tw);
+  } else if (hit){
     vec3 p = ro + rd * t;
     vec3 n = calcNormal(p, t);
     vec3 alb;
@@ -439,6 +503,14 @@ void main(){
     float dif = max(dot(n, uSunDir) + wrap, 0.) / (1. + wrap);
     float sh = 1.;
     if (dif > .01 && t < 220.) sh = softShadow(p + n * .05, uSunDir);
+    if (uGroundOn > .5 && mat < 1.5){
+      vec2 guv = (p.xz - uGroundRect.xy) / uGroundRect.zw;
+      if (all(greaterThan(guv, vec2(0.))) && all(lessThan(guv, vec2(1.)))){
+        vec2 gm = texture(uGroundMap, guv).rg;
+        ao *= gm.r;
+        sh *= gm.g;
+      }
+    }
     vec3 L = uTorchPos - p;
     float ld = length(L);
     L /= ld;
@@ -486,12 +558,17 @@ layout(location = 1) in vec3 aBase;     // world position of the bottom centre
 layout(location = 2) in vec2 aSize;     // width, height (m)
 layout(location = 3) in vec4 aUV;       // atlas rect u0 v0 u1 v1 (v0 = top)
 layout(location = 4) in vec2 aSway;     // amount, phase
+layout(location = 5) in float aTint;    // colour variation -1..1
 uniform vec3 uCamPos, uCamRight, uCamUp, uCamFwd;
 uniform float uTanHalfFov, uAspect, uTime, uWind;
 out vec2 vUv;
 out float vDepth;
 out float vWorldY;
+out float vGlow;
+out float vTint;
 void main(){
+  vGlow = aSway.y < 0. ? 1. : 0.;
+  vTint = aTint;
   vec3 side = normalize(vec3(uCamRight.x, 0., uCamRight.z));
   float k = aCorner.y * aCorner.y;
   float sw = (sin(uTime * .9 + aSway.y) * .6 + sin(uTime * 2.1 + aSway.y * 1.7) * .2) * aSway.x * uWind * k;
@@ -511,11 +588,16 @@ precision highp float;
 in vec2 vUv;
 in float vDepth;
 in float vWorldY;
+in float vGlow;
+in float vTint;
 out vec4 fragColor;
 uniform sampler2D uAtlas, uDepth;
+uniform float uTime;
 uniform vec2 uRes;
 uniform float uTanHalfFov, uFog, uCloudBand, uBandY;
 uniform vec3 uTint, uHaze, uHorizon, uSunColor, uSunDir, uCloudLit, uCamFwd, uCamRight, uCamUp;
+uniform vec3 uCamPos, uTorchPos, uTorchColor;
+uniform float uTorch, uTorchWorld;
 void main(){
   vec4 tx = texture(uAtlas, vUv);
   if (tx.a < .5) discard;
@@ -524,8 +606,19 @@ void main(){
   vec4 dt = texelFetch(uDepth, ivec2(gl_FragCoord.xy), 0);
   float sceneT = (dt.r + dt.g / 255.) * 1000.;
   if (t > sceneT + .4) discard;
-  vec3 col = tx.rgb / tx.a * uTint;
+  vec3 alb = tx.rgb / tx.a;
+  // per-instance variation so a forest of the same three pines never repeats
+  alb *= 1. + vTint * .09;
+  alb = mix(alb, alb * vec3(1.07, 1.03, .86), max(vTint, 0.) * .6);
+  alb = mix(alb, alb * vec3(.9, 1., 1.1), max(-vTint, 0.) * .6);
   vec3 rd = normalize(uCamFwd + (uv.x * uCamRight + uv.y * uCamUp) * uTanHalfFov);
+  // warm firelight on props near the torch or campfire
+  vec3 wp = uCamPos + rd * t;
+  vec3 L = uTorchPos - wp;
+  // smoothstep: the campfire sprite itself is already painted bright
+  float att = uTorch * uTorchWorld / (1. + dot(L, L) * .14) * smoothstep(.9, 2.2, length(L));
+  vec3 col = alb * (uTint + uTorchColor * att * 1.6);
+  if (vGlow > .5) col = alb * (1.05 + .12 * sin(uTime * 11.) + .08 * sin(uTime * 23. + 1.7));
   float fogAmt = 1. - exp(-t * uFog);
   vec3 hz = mix(uHaze, uHorizon, smoothstep(200., 800., t) * .5);
   hz += uSunColor * pow(max(dot(rd, uSunDir), 0.), 6.) * .3;
@@ -533,6 +626,86 @@ void main(){
   float band = exp(-pow((vWorldY - uBandY) / 12., 2.)) * smoothstep(80., 180., t) * uCloudBand;
   col = mix(col, uCloudLit * .95, clamp(band, 0., .85));
   fragColor = vec4(col, 1.);
+}
+`
+
+/**
+ * Fireflies and campfire embers as GPU-animated points (no per-frame CPU
+ * work). Fireflies live in a 50 m box that wraps around the camera, so
+ * they are everywhere without being stored anywhere.
+ */
+export const PARTICLE_VERT = /* glsl */ `#version 300 es
+uniform vec3 uCamPos, uCamRight, uCamUp, uCamFwd, uFirePos;
+uniform float uTanHalfFov, uAspect, uTime, uGround, uCount, uFireflies, uEmbers, uWind;
+out float vGlow;
+out vec3 vColor;
+out float vDepth;
+out float vSize;
+float h1(float n){ return fract(sin(n * 127.1 + 3.7) * 43758.5453); }
+void main(){
+  float id = float(gl_VertexID);
+  vec3 wp;
+  float glow;
+  vec3 col;
+  if (id < uCount){
+    float r1 = h1(id), r2 = h1(id + 17.3), r3 = h1(id + 41.9), r4 = h1(id + 73.1);
+    vec2 rel = mod(vec2(r1, r2) * 50. - uCamPos.xz, 50.) - 25.;
+    float t = uTime * (.25 + r3 * .3);
+    vec3 drift = vec3(sin(t * 1.3 + r1 * 20.) * 1.4 + uWind * .4 * sin(t * .3),
+                      sin(t * .9 + r2 * 10.) * .45,
+                      cos(t * 1.1 + r4 * 20.) * 1.4);
+    wp = vec3(uCamPos.x + rel.x, uGround + .35 + r3 * 2.4, uCamPos.z + rel.y) + drift;
+    // slow blink: mostly dark, then a soft pulse
+    glow = pow(max(sin(uTime * (.9 + r4 * 1.1) + r1 * 40.), 0.), 3.) * uFireflies;
+    glow *= 1. - smoothstep(16., 24., length(rel));
+    col = mix(vec3(.75, 1., .35), vec3(1., .95, .45), r2);
+  } else {
+    float e = id - uCount;
+    float r1 = h1(e + 3.1), r2 = h1(e + 9.7), r3 = h1(e + 27.3);
+    float life = fract(uTime * (.3 + r1 * .45) + r2);
+    wp = uFirePos + vec3((r1 - .5) * .6 + sin(uTime * 3. + r2 * 20.) * .2 * life + uWind * .5 * life,
+                         .35 + life * 3.4,
+                         (r3 - .5) * .6 + cos(uTime * 2.3 + r1 * 9.) * .2 * life);
+    glow = (1. - life) * (1. - life) * uEmbers * 1.4;
+    col = mix(vec3(1., .85, .4), vec3(1., .35, .12), life);
+  }
+  vec3 d = wp - uCamPos;
+  float x = dot(d, uCamRight), y = dot(d, uCamUp), z = dot(d, uCamFwd);
+  vDepth = z;
+  vGlow = glow;
+  vColor = col;
+  if (glow < .02 || z < .25){ gl_Position = vec4(2., 2., 2., 1.); gl_PointSize = 1.; vSize = 1.; return; }
+  gl_Position = vec4(x / (uTanHalfFov * uAspect * z), y / (uTanHalfFov * z), 0., 1.);
+  vSize = z < 9. ? 3. : 1.;
+  gl_PointSize = vSize;
+}
+`
+
+export const PARTICLE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in float vGlow;
+in vec3 vColor;
+in float vDepth;
+in float vSize;
+out vec4 fragColor;
+uniform sampler2D uDepth;
+uniform vec2 uRes;
+uniform float uTanHalfFov;
+void main(){
+  // 3px points become a little pixel-art plus: bright core, dim arms
+  float k = 1.;
+  if (vSize > 1.5){
+    vec2 pc = floor(gl_PointCoord * 3.);
+    bool core = pc.x == 1. && pc.y == 1.;
+    bool arm = pc.x == 1. || pc.y == 1.;
+    if (!arm) discard;
+    k = core ? 1. : .35;
+  }
+  vec2 uv = (gl_FragCoord.xy * 2. - uRes) / uRes.y;
+  float t = vDepth * length(vec3(uv * uTanHalfFov, 1.));
+  vec4 dt = texelFetch(uDepth, ivec2(gl_FragCoord.xy), 0);
+  if (t > (dt.r + dt.g / 255.) * 1000. + .3) discard;
+  fragColor = vec4(vColor * vGlow * k * 1.5, 1.);
 }
 `
 
@@ -629,7 +802,7 @@ precision highp float;
 out vec4 fragColor;
 uniform sampler2D uScene;
 uniform vec2 uLowRes, uOffset;
-uniform float uScale, uDither, uFade;
+uniform float uScale, uDither, uFade, uGrade;
 uniform vec3 uPal[64];
 uniform int uPalN, uUsePal;
 
@@ -645,8 +818,16 @@ void main(){
   ivec2 lp = ivec2(floor((gl_FragCoord.xy - uOffset) / uScale));
   lp = clamp(lp, ivec2(0), ivec2(uLowRes) - 1);
   vec3 c = texelFetch(uScene, lp, 0).rgb;
+  // "toy" grade (after BRICKLAND): soft S-curve contrast, richer saturation,
+  // and a smooth vignette, applied before the palette so it picks richer tones
+  vec3 g = clamp(c, 0., 1.);
+  g = mix(g, smoothstep(0., 1., g), .18);
+  float luma = dot(g, vec3(.2126, .7152, .0722));
+  g = max(mix(vec3(luma), g, 1.2), 0.);
+  c = mix(c, g, uGrade);
   vec2 uv = (vec2(lp) + .5) / uLowRes - .5;
-  c *= 1. - dot(uv * vec2(.9, 1.2), uv * vec2(.9, 1.2)) * .9;
+  float vd = length(uv) * 1.42;
+  c *= mix(1. - dot(uv * vec2(.9, 1.2), uv * vec2(.9, 1.2)) * .9, 1. - smoothstep(.22, .92, vd) * .42, uGrade);
   c *= uFade;
   float b = bayer4(lp);
   vec3 o;

@@ -17,10 +17,11 @@ import { defineConfig } from "cf/config"
  */
 export default defineConfig({
   worker: {
-    name: "tanstack-start-workers-template",
+    name: "winterfell",
     compatibilityDate: "2026-09-01",
     compatibilityFlags: ["nodejs_compat"],
     entrypoint: "@tanstack/react-start/server-entry",
+    domains: ["winterfell.fayazahmed.com"],
     observability: {
       enabled: true,
     },

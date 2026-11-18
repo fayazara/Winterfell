@@ -3,7 +3,7 @@ import { Engine, type Settings } from "@/game/engine"
 import { PRESETS } from "@/game/presets"
 import { PALETTES, type PaletteId } from "@/game/palettes"
 
-const initial: Settings = { pixelHeight: 400, ...PRESETS[0].tweaks, autoWalk: true, riding: false }
+const initial: Settings = { pixelHeight: 400, ...PRESETS[0].tweaks, autoWalk: true, riding: false, grade: true, sound: true }
 
 export function GameView() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -14,6 +14,8 @@ export function GameView() {
   const [fps, setFps] = useState(0)
   const [locked, setLocked] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [camping, setCamping] = useState(false)
+  const [verse, setVerse] = useState<string | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -24,6 +26,10 @@ export function GameView() {
         onAutoWalk: (autoWalk) => setSettings((s) => ({ ...s, autoWalk })),
         onPointerLock: setLocked,
         onRiding: (riding) => setSettings((s) => ({ ...s, riding })),
+        onCamp: setCamping,
+        onVerse: setVerse,
+        onPreset: setPresetId,
+        onSound: (sound) => setSettings((s) => ({ ...s, sound })),
       })
       engineRef.current = e
       e.start()
@@ -81,11 +87,19 @@ export function GameView() {
         </p>
       </div>
 
+      <Verse text={verse} />
+
       <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 text-center text-xs text-[#7a7686] drop-shadow-[1px_1px_0_#07060d]">
+        {camping ? (
+          <>Resting by the fire · look around freely · C to break camp at dawn</>
+        ) : (
+          <>
         {locked ? "Esc to free the mouse" : "Click to look around"} ·{" "}
         {settings.riding ? "W/S ride · A/D turn · Shift gallop" : "WASD walk · Shift run"} · H{" "}
         {settings.riding ? "dismount" : "mount horse"} · R auto-{settings.riding ? "ride" : "walk"}
-        {settings.autoWalk ? " (on)" : " (off)"} · P panel
+        {settings.autoWalk ? " (on)" : " (off)"} · C make camp · M sound · P panel
+          </>
+        )}
       </div>
 
       {panel ? (
@@ -138,6 +152,29 @@ export function GameView() {
             </select>
           </label>
 
+          <button
+            onClick={() => engineRef.current?.toggleCamp()}
+            className={`mt-3 w-full border px-2 py-1.5 text-xs tracking-wider uppercase ${
+              camping
+                ? "border-[#e8a040] bg-[#2e2a5c] text-[#f6d27a]"
+                : "border-[#6e3b22] bg-[#2b1a14] text-[#f0a040] hover:border-[#e8a040]"
+            }`}
+          >
+            {camping ? "Break camp (C)" : "Make camp (C)"}
+          </button>
+
+          <label className="mt-2 flex items-center justify-between">
+            <span>Sound (M)</span>
+            <input type="checkbox" checked={settings.sound} className="accent-[#e8a040]"
+              onChange={(e) => update({ sound: e.target.checked })} />
+          </label>
+
+          <label className="mt-2 flex items-center justify-between">
+            <span>Toy colour grade</span>
+            <input type="checkbox" checked={settings.grade} className="accent-[#e8a040]"
+              onChange={(e) => update({ grade: e.target.checked })} />
+          </label>
+
           <label className="mt-2 flex items-center justify-between">
             <span>Ride the horse (H)</span>
             <input type="checkbox" checked={settings.riding} className="accent-[#e8a040]"
@@ -186,5 +223,33 @@ function Slider(props: {
         className="w-full accent-[#e8a040]"
       />
     </label>
+  )
+}
+
+/** A short verse that fades in and out over the scene while resting. */
+function Verse({ text }: { text: string | null }) {
+  const [shown, setShown] = useState<string | null>(null)
+  const [visible, setVisible] = useState(false)
+  useEffect(() => {
+    if (text) {
+      setShown(text)
+      const id = requestAnimationFrame(() => setVisible(true))
+      return () => cancelAnimationFrame(id)
+    }
+    setVisible(false)
+    const id = setTimeout(() => setShown(null), 2500)
+    return () => clearTimeout(id)
+  }, [text])
+  if (!shown) return null
+  return (
+    <div
+      className={`pointer-events-none absolute inset-x-0 top-[22%] text-center transition-opacity duration-[2500ms] ease-in-out ${
+        visible ? "opacity-100" : "opacity-0"
+      }`}
+    >
+      <p className="mx-auto max-w-md px-4 text-lg leading-relaxed whitespace-pre-line text-[#f0e8f0] drop-shadow-[2px_2px_0_#07060d] sm:text-xl">
+        {shown}
+      </p>
+    </div>
   )
 }

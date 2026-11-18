@@ -62,6 +62,16 @@ export function pathX(z: number) {
 export const CASTLE_Z = -190
 export const CASTLE_X = pathX(CASTLE_Z)
 
+/** A lake in the valley, left of the road (ellipse centre + radii, metres). */
+export const LAKE = { x: pathX(-42) - 34, z: -42, rx: 24, rz: 15 }
+
+/** Normalised elliptical distance from the lake centre (1 = nominal shore). */
+export function lakeE(x: number, z: number) {
+  const dx = (x - LAKE.x) / LAKE.rx
+  const dz = (z - LAKE.z) / LAKE.rz
+  return Math.sqrt(dx * dx + dz * dz)
+}
+
 /** Walkable z range along the path (the castle crag sits beyond the far end). */
 export const PATH_START_Z = 34
 export const PATH_END_Z = -112
@@ -86,13 +96,24 @@ function ridged(x: number, z: number) {
  * Valley floor with the path, rising walls either side, a high start that
  * descends into the valley, a rocky crag under the castle and a far range.
  */
-export function terrainHeight(x: number, z: number) {
+/** Valley floor and path, before the lake, the descent and the crag. */
+function valleyHeight(x: number, z: number) {
   const px = pathX(z)
   const d = Math.abs(x - px)
   let h = terrainBase(x, z) + fbm(x * 0.15 + 5.3, z * 0.15 + 1.7, 2)
   h += smoothstep(20, 150, d) * (30 + 25 * vnoise(x * 0.012, z * 0.012))
   const m = 1 - smoothstep(1.5, 4, d)
   if (m > 0) h = lerp(h, terrainBase(px, z) - 0.2, m)
+  return h
+}
+
+/** The lake bed is flattened to this height (valley-floor space). */
+export const LAKE_FLOOR = valleyHeight(LAKE.x, LAKE.z) - 3
+
+export function terrainHeight(x: number, z: number) {
+  let h = valleyHeight(x, z)
+  // a flat lake bed with gentle banks rising to the natural ground
+  h = lerp(h, LAKE_FLOOR, 1 - smoothstep(0.6, 1.25, lakeE(x, z)))
   h += 16 * smoothstep(-50, 40, z)
   h += smoothstep(-240, -420, z) * (50 + 170 * ridged(x * 0.005, z * 0.005))
   const cx = x - CASTLE_X
@@ -103,3 +124,13 @@ export function terrainHeight(x: number, z: number) {
 }
 
 export const CASTLE_Y = terrainHeight(CASTLE_X, CASTLE_Z) - 3
+
+/** Water surface height: just under the lowest point of the lake rim. */
+export const WATER_Y = (() => {
+  let min = Infinity
+  for (let i = 0; i < 48; i++) {
+    const a = (i / 48) * Math.PI * 2
+    min = Math.min(min, terrainHeight(LAKE.x + Math.cos(a) * LAKE.rx * 1.12, LAKE.z + Math.sin(a) * LAKE.rz * 1.12))
+  }
+  return min - 0.45
+})()
