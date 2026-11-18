@@ -6,13 +6,14 @@
 import type { Sprite } from "./sprites"
 
 export interface HandSprite extends Sprite {
-  /** torch only: where the burning head sits (sprite pixels) */
+  /** torch: where the burning head sits; horse: between the ears (sprite pixels) */
   anchor?: { x: number; y: number; w: number }
 }
 
 export const HAND_IMAGES = {
   torch: "/sprites/hand-torch.png",
   sword: "/sprites/hand-sword.png",
+  horse: "/sprites/hand-horse.png",
 } as const
 
 export function loadImage(url: string) {
@@ -52,7 +53,7 @@ export function contentBox(img: HTMLImageElement) {
   return box
 }
 
-export function buildHandSprite(img: HTMLImageElement, targetH: number, kind: "torch" | "sword"): HandSprite {
+export function buildHandSprite(img: HTMLImageElement, targetH: number, kind: "torch" | "sword" | "horse"): HandSprite {
   const box = contentBox(img)
   const h = Math.max(8, Math.round(targetH))
   const w = Math.max(4, Math.round((box.w * h) / box.h))
@@ -81,8 +82,8 @@ export function buildHandSprite(img: HTMLImageElement, targetH: number, kind: "t
   }
 
   const sprite: HandSprite = { w, h, k: 1, data }
-  if (kind === "torch") {
-    // the burning head: opaque span across the top few percent of rows
+  if (kind === "torch" || kind === "horse") {
+    // the top of the shape: the burning head, or the horse's ears: opaque span across the top few percent of rows
     let top = 0
     while (top < h && !rowHas(data, w, top)) top++
     const band = Math.max(2, Math.round(h * 0.05))

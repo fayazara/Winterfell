@@ -3,7 +3,7 @@ import { Engine, type Settings } from "@/game/engine"
 import { PRESETS } from "@/game/presets"
 import { PALETTES, type PaletteId } from "@/game/palettes"
 
-const initial: Settings = { pixelHeight: 400, ...PRESETS[0].tweaks, autoWalk: true }
+const initial: Settings = { pixelHeight: 400, ...PRESETS[0].tweaks, autoWalk: true, riding: false }
 
 export function GameView() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -23,6 +23,7 @@ export function GameView() {
         onFps: setFps,
         onAutoWalk: (autoWalk) => setSettings((s) => ({ ...s, autoWalk })),
         onPointerLock: setLocked,
+        onRiding: (riding) => setSettings((s) => ({ ...s, riding })),
       })
       engineRef.current = e
       e.start()
@@ -81,7 +82,9 @@ export function GameView() {
       </div>
 
       <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 text-center text-xs text-[#7a7686] drop-shadow-[1px_1px_0_#07060d]">
-        {locked ? "Esc to free the mouse" : "Click to look around"} · WASD walk · Shift run · R auto-walk
+        {locked ? "Esc to free the mouse" : "Click to look around"} ·{" "}
+        {settings.riding ? "W/S ride · A/D turn · Shift gallop" : "WASD walk · Shift run"} · H{" "}
+        {settings.riding ? "dismount" : "mount horse"} · R auto-{settings.riding ? "ride" : "walk"}
         {settings.autoWalk ? " (on)" : " (off)"} · P panel
       </div>
 
@@ -136,7 +139,13 @@ export function GameView() {
           </label>
 
           <label className="mt-2 flex items-center justify-between">
-            <span>Auto-walk the road</span>
+            <span>Ride the horse (H)</span>
+            <input type="checkbox" checked={settings.riding} className="accent-[#e8a040]"
+              onChange={(e) => update({ riding: e.target.checked })} />
+          </label>
+
+          <label className="mt-2 flex items-center justify-between">
+            <span>Auto-{settings.riding ? "ride" : "walk"} the road</span>
             <input type="checkbox" checked={settings.autoWalk} className="accent-[#e8a040]"
               onChange={(e) => update({ autoWalk: e.target.checked })} />
           </label>

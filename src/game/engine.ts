@@ -27,6 +27,7 @@ import {
   PATH_START_Z,
   clamp,
   lerp,
+  smoothstep,
   pathX,
   terrainHeight,
   vnoise,
@@ -36,17 +37,23 @@ export interface Settings extends Tweaks {
   /** Target height of the internal framebuffer in pixels (smaller = chunkier). */
   pixelHeight: number
   autoWalk: boolean
+  /** on horseback */
+  riding: boolean
 }
 
 export interface EngineCallbacks {
   onFps?: (fps: number) => void
   onAutoWalk?: (on: boolean) => void
   onPointerLock?: (locked: boolean) => void
+  onRiding?: (on: boolean) => void
 }
 
 type Prog = { p: WebGLProgram; u: Map<string, WebGLUniformLocation | null> }
 
 const EYE = 1.72
+/** eye height in the saddle */
+const EYE_RIDING = 2.55
+const easeInOut = (t: number) => t * t * (3 - 2 * t)
 /** floats per billboard instance: pos3 size2 uv4 sway2 */
 const BB_FLOATS = 11
 const FOV = (62 * Math.PI) / 180
@@ -106,7 +113,7 @@ export class Engine {
   private propDist: Float32Array = new Float32Array(0)
   private torchTex: { tex: WebGLTexture; s: HandSprite }
   private swordTex: { tex: WebGLTexture; s: HandSprite }
-  private handImgs: { torch: HTMLImageElement; sword: HTMLImageElement } | null = null
+  private handImgs: { torch: HTMLImageElement; sword: HTMLImageElement; horse: HTMLImageElement } | null = null
   private handsH = 0
   private destroyed = false
   private low = { w: 320, h: 180, scale: 4, ox: 0, oy: 0 }
@@ -124,6 +131,15 @@ export class Engine {
   private lookOffset = { yaw: 0, pitch: 0 }
   private bobPhase = 0
   private moving = 0
+  // riding
+  private mountT = 0
+  private rideSpeed = 0
+  private turnRate = 0
+  private ridePhase = 0
+  private gallop = 0
+  /** the horse standing in the world while you are on foot */
+  private horseProp: Prop | null = null
+  private horseTex: { tex: WebGLTexture; s: HandSprite } | null = null
   private keys = new Set<string>()
   private fade = 0
   private looping = false
@@ -184,7 +200,8 @@ export class Engine {
     const p = PRESETS[0]
     this.envFrom = p.env
     this.envTo = p.env
-    this.settings = { pixelHeight: 400, ...p.tweaks, autoWalk: true }
+    this.settings = { pixelHeight: 400, ...p.tweaks, autoWalk: true, riding: false }
+    this.parkHorse(pathX(PATH_START_Z - 7) + 2.6, PATH_START_Z - 7)
 
     this.camY = terrainHeight(this.pos.x, this.pos.z) + EYE
     this.yaw = this.pathYaw(this.pos.z)
@@ -202,10 +219,10 @@ export class Engine {
 
   // ---------- public API ----------
   start() {
-    Promise.all([loadImage(HAND_IMAGES.torch), loadImage(HAND_IMAGES.sword)])
-      .then(([torch, sword]) => {
+    Promise.all([loadImage(HAND_IMAGES.torch), loadImage(HAND_IMAGES.sword), loadImage(HAND_IMAGES.horse)])
+      .then(([torch, sword, horse]) => {
         if (this.destroyed) return
-        this.handImgs = { torch, sword }
+        this.handImgs = { torch, sword, horse }
         this.rebuildHands(true)
       })
       .catch((err) => console.warn("hand images unavailable, using procedural hands", err))
@@ -226,9 +243,9 @@ export class Engine {
         this.atlas = atlas
         this.atlasTex = tex
         this.props = placeProps()
-        this.bbData = new Float32Array(this.props.length * BB_FLOATS)
-        this.propOrder = new Int32Array(this.props.length)
-        this.propDist = new Float32Array(this.props.length)
+        this.bbData = new Float32Array((this.props.length + 1) * BB_FLOATS)
+        this.propOrder = new Int32Array(this.props.length + 1)
+        this.propDist = new Float32Array(this.props.length + 1)
       })
       .catch((err) => console.warn("world props unavailable, using procedural trees", err))
     loadImage(SKY_URL)
@@ -273,6 +290,7 @@ export class Engine {
     const prevH = this.settings.pixelHeight
     this.settings = { ...this.settings, ...s }
     if (s.autoWalk === true) this.lookOffset = { yaw: 0, pitch: 0 }
+    if (s.riding !== undefined) this.applyRiding(s.riding)
     if (this.settings.pixelHeight !== prevH) this.resize()
   }
 
@@ -285,6 +303,7 @@ export class Engine {
       if (this.settings.autoWalk) this.setAutoWalk(false)
     }
     if (e.code === "KeyR") this.setAutoWalk(!this.settings.autoWalk)
+    if (e.code === "KeyH") this.setRiding(!this.settings.riding)
     this.keys.add(e.code)
   }
   private onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code)
@@ -333,6 +352,29 @@ export class Engine {
     this.lookOffset = { yaw: 0, pitch: 0 }
     this.settings = { ...this.settings, autoWalk: on }
     this.cb.onAutoWalk?.(on)
+  }
+
+  private setRiding(on: boolean) {
+    this.settings = { ...this.settings, riding: on }
+    this.applyRiding(on)
+    this.cb.onRiding?.(on)
+  }
+
+  /** Mount (the parked horse leaves the world) or dismount (it stays beside you). */
+  private applyRiding(on: boolean) {
+    if (on) {
+      this.horseProp = null
+    } else if (!this.horseProp) {
+      const rx = Math.cos(this.yaw)
+      const rz = Math.sin(this.yaw)
+      this.parkHorse(this.pos.x + rx * 2.4, this.pos.z + rz * 2.4)
+      this.rideSpeed = 0
+      this.turnRate = 0
+    }
+  }
+
+  private parkHorse(x: number, z: number) {
+    this.horseProp = { x, y: terrainHeight(x, z) - 0.15, z, h: 2.5, key: "horse", sway: 0, phase: 0 }
   }
 
   // ---------- sizing ----------
@@ -384,6 +426,8 @@ export class Engine {
       gl.deleteTexture(this.swordTex.tex)
       this.torchTex = this.uploadSprite(buildHandSprite(this.handImgs.torch, lh * 0.68, "torch"))
       this.swordTex = this.uploadSprite(buildHandSprite(this.handImgs.sword, lh * 0.96, "sword"))
+      if (this.horseTex) gl.deleteTexture(this.horseTex.tex)
+      this.horseTex = this.uploadSprite(buildHandSprite(this.handImgs.horse, lh * 0.52, "horse"))
       return
     }
     const k = Math.max(1, Math.round(lh / 180))
@@ -435,8 +479,14 @@ export class Engine {
     const s = this.settings
     let speed = 0
 
+    const riding = s.riding
+    this.mountT = clamp(this.mountT + (riding ? dt : -dt) / 0.9, 0, 1)
+
     if (s.autoWalk) {
-      speed = 1.5
+      if (riding) {
+        this.rideSpeed += (4.2 - this.rideSpeed) * (1 - Math.exp(-dt * 1.5))
+        speed = this.rideSpeed
+      } else speed = 1.5
       if (!this.looping) {
         this.pos.z -= speed * dt
         this.pos.x = lerp(this.pos.x, pathX(this.pos.z) + Math.sin(this.time * 0.13) * 0.4, 1 - Math.exp(-dt * 2))
@@ -451,6 +501,21 @@ export class Engine {
         this.lookOffset.yaw -= this.lookOffset.yaw * k
         this.lookOffset.pitch -= this.lookOffset.pitch * k
       }
+    } else if (riding) {
+      // the horse has weight: throttle and turning ease in and out
+      const fwd = (this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0) - (this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0)
+      const turn =
+        (this.keys.has("KeyD") || this.keys.has("ArrowRight") ? 1 : 0) - (this.keys.has("KeyA") || this.keys.has("ArrowLeft") ? 1 : 0)
+      const galloping = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")
+      const target = fwd > 0 ? (galloping ? 9.5 : 4) : fwd < 0 ? -1.3 : 0
+      const accel = target > this.rideSpeed ? 1.6 : 2.4
+      this.rideSpeed += (target - this.rideSpeed) * (1 - Math.exp(-dt * accel))
+      const maxTurn = lerp(1.5, 0.75, smoothstep(4, 9.5, Math.abs(this.rideSpeed)))
+      this.turnRate += (turn * maxTurn - this.turnRate) * (1 - Math.exp(-dt * 4))
+      this.yaw += this.turnRate * dt
+      this.pos.x = clamp(this.pos.x + Math.sin(this.yaw) * this.rideSpeed * dt, -160, 160)
+      this.pos.z = clamp(this.pos.z - Math.cos(this.yaw) * this.rideSpeed * dt, -128, 90)
+      speed = Math.abs(this.rideSpeed)
     } else {
       const fwd = (this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0) - (this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0)
       const str = (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0)
@@ -478,7 +543,7 @@ export class Engine {
         this.pos.z = PATH_START_Z
         this.pos.x = pathX(PATH_START_Z)
         this.yaw = this.pathYaw(this.pos.z)
-        this.camY = terrainHeight(this.pos.x, this.pos.z) + EYE
+        this.camY = terrainHeight(this.pos.x, this.pos.z) + (this.settings.riding ? EYE_RIDING : EYE)
         this.looping = false
       }
     } else {
@@ -486,9 +551,16 @@ export class Engine {
     }
 
     this.moving += ((speed > 0.1 ? 1 : 0) - this.moving) * (1 - Math.exp(-dt * 5))
-    this.bobPhase += speed * dt * 2.3
+    if (riding) {
+      // walk is a 4-beat gait (two bumps per stride); gallop a slower, bigger roll
+      this.gallop += (smoothstep(5, 8.5, speed) - this.gallop) * (1 - Math.exp(-dt * 3))
+      this.ridePhase += dt * Math.PI * 2 * lerp(1.45, 2.2, this.gallop) * Math.min(1, speed / 1.5)
+    } else {
+      this.bobPhase += speed * dt * 2.3
+    }
     const ground = terrainHeight(this.pos.x, this.pos.z)
-    this.camY += (ground + EYE - this.camY) * (1 - Math.exp(-dt * 10))
+    const eye = lerp(EYE, EYE_RIDING, easeInOut(this.mountT))
+    this.camY += (ground + eye - this.camY) * (1 - Math.exp(-dt * 10))
   }
 
   private torchFlicker() {
@@ -521,9 +593,11 @@ export class Engine {
   private fillBillboards(cam: number[], fwd: number[]) {
     const atlas = this.atlas!
     const props = this.props
+    const total = props.length + (this.horseProp ? 1 : 0)
+    const get = (i: number) => (i < props.length ? props[i] : this.horseProp!)
     let n = 0
-    for (let i = 0; i < props.length; i++) {
-      const p = props[i]
+    for (let i = 0; i < total; i++) {
+      const p = get(i)
       const dx = p.x - cam[0]
       const dz = p.z - cam[2]
       const along = dx * fwd[0] + dz * fwd[2]
@@ -537,7 +611,7 @@ export class Engine {
     const order = Array.from(this.propOrder.subarray(0, n)).sort((a, b) => this.propDist[b] - this.propDist[a])
     const out = this.bbData
     for (let k = 0; k < n; k++) {
-      const p = props[order[k]]
+      const p = get(order[k])
       const e = atlas.entries[p.key]
       const o = k * BB_FLOATS
       out[o] = p.x
@@ -564,11 +638,16 @@ export class Engine {
     const torchColor: [number, number, number] = [1.0, 0.6, 0.28]
 
     // camera basis
-    const bob = Math.sin(this.bobPhase * 2) * 0.035 * this.moving
-    const sway = Math.sin(this.bobPhase) * 0.012 * this.moving
+    const mt = easeInOut(this.mountT)
+    const rp = this.ridePhase
+    const gaitAmp = lerp(0.03, 0.1, this.gallop) * this.moving
+    const gait = lerp(Math.sin(rp * 2), Math.sin(rp) * 0.75 + Math.sin(rp * 2) * 0.25, this.gallop)
+    const bob = lerp(Math.sin(this.bobPhase * 2) * 0.035 * this.moving, gait * gaitAmp, mt)
+    const sway = lerp(Math.sin(this.bobPhase) * 0.012 * this.moving, Math.sin(rp) * 0.01 * this.moving, mt)
     const breathe = Math.sin(this.time * 1.4) * 0.006
+    const rock = Math.sin(rp + 0.8) * gaitAmp * 0.22 * mt
     const yaw = this.yaw + this.lookOffset.yaw + sway * 0.3
-    const pitch = this.pitch + this.lookOffset.pitch + breathe
+    const pitch = this.pitch + this.lookOffset.pitch + breathe + rock
     const cp = Math.cos(pitch)
     const fwd = [Math.sin(yaw) * cp, Math.sin(pitch), -Math.cos(yaw) * cp]
     const right = [Math.cos(yaw), 0, Math.sin(yaw)]
@@ -582,8 +661,11 @@ export class Engine {
 
     // sprite layout (low-res pixels, top-left origin)
     const ss = this.spriteK
-    const handBobX = Math.round(Math.sin(this.bobPhase) * 2.5 * this.moving * ss)
-    const handBobY = Math.round((Math.abs(Math.sin(this.bobPhase)) * 3 * this.moving + Math.sin(this.time * 1.4) * 1.2) * ss)
+    const gaitPx = lerp(2, 7, this.gallop) * this.moving * ss
+    const handBobX = Math.round(lerp(Math.sin(this.bobPhase) * 2.5 * this.moving * ss, Math.sin(rp) * 1.5 * this.moving * ss, mt))
+    const handBobY = Math.round(
+      lerp(Math.abs(Math.sin(this.bobPhase)) * 3 * this.moving * ss, gait * gaitPx * 0.8, mt) + Math.sin(this.time * 1.4) * 1.2 * ss,
+    )
     const torchS = this.torchTex.s
     const swordS = this.swordTex.s
     const swordBob = Math.round(Math.abs(Math.cos(this.bobPhase)) * 3 * this.moving * ss)
@@ -626,6 +708,8 @@ export class Engine {
     // painted props are drawn for the sunset look; other moods tint them
     const propTint = tint.map((c, i) => lerp(1, c / lum, 0.5) * lerp(0.92, 1, env.paintedSky) + (i === 2 ? 0.02 : 0))
 
+    const ground0 = terrainHeight(this.pos.x, this.pos.z)
+
     // ---- pass 1: scene ----
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fboScene)
     gl.viewport(0, 0, w, h)
@@ -650,7 +734,7 @@ export class Engine {
     gl.uniform1f(loc(gl, P, "uTorchWorld"), env.torchWorld)
     gl.uniform1f(loc(gl, P, "uCloudCover"), env.cloudCover)
     gl.uniform1f(loc(gl, P, "uCloudBand"), env.cloudBand)
-    gl.uniform1f(loc(gl, P, "uGround"), this.camY - EYE)
+    gl.uniform1f(loc(gl, P, "uGround"), ground0)
     gl.uniform3fv(loc(gl, P, "uSkyTop"), env.skyTop)
     gl.uniform3fv(loc(gl, P, "uHorizon"), env.horizon)
     gl.uniform3fv(loc(gl, P, "uSunColor"), env.sunColor)
@@ -730,7 +814,15 @@ export class Engine {
       gl.uniform3fv(loc(gl, Q, "uHandLight"), handLight)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
     }
-    drawSprite(this.swordTex, swordX, swordY)
+    // on horseback the sword is sheathed and the horse's neck rises into view
+    if (this.horseTex && mt > 0.01) {
+      const hs = this.horseTex.s
+      const ax = hs.anchor ? hs.anchor.x : hs.w / 2
+      const hx = Math.round(w * 0.5 - ax + Math.sin(rp) * 1.5 * this.moving * ss)
+      const hy = h - hs.h + Math.round(h * 0.06 + (1 - mt) * h * 0.85 + Math.sin(rp * 2 + 0.6) * gaitPx)
+      drawSprite(this.horseTex, hx, hy)
+    }
+    if (mt < 0.99) drawSprite(this.swordTex, swordX, swordY + Math.round(mt * h * 0.9))
     drawSprite(this.torchTex, torchX, torchY)
     P = this.flame
     gl.useProgram(P.p)

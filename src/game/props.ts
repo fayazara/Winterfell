@@ -11,7 +11,7 @@ const BASE = "/sprites/world/"
 export const PROP_KEYS = [
   "pine_0", "pine_1", "pine_2", "tree_0", "tree_1",
   "bush_0", "bush_1", "bush_2", "rock_0", "rock_1",
-  "cottage_0", "cottage_1", "castle",
+  "cottage_0", "cottage_1", "castle", "horse",
 ] as const
 export type PropKey = (typeof PROP_KEYS)[number]
 
@@ -34,7 +34,8 @@ export interface Atlas {
 const ATLAS = 2048
 
 export async function buildAtlas(): Promise<Atlas> {
-  const imgs = await Promise.all(PROP_KEYS.map((k) => loadImage(`${BASE}${k}.png`)))
+  const url = (k: PropKey) => (k === "horse" ? "/sprites/library/creatures/horse_brown.png" : `${BASE}${k}.png`)
+  const imgs = await Promise.all(PROP_KEYS.map((k) => loadImage(url(k))))
   const canvas = document.createElement("canvas")
   canvas.width = ATLAS
   canvas.height = ATLAS
@@ -61,6 +62,7 @@ export async function buildAtlas(): Promise<Atlas> {
       v1: (y + box.h) / ATLAS,
       aspect: box.w / box.h,
     }
+    if (y + box.h > ATLAS) console.warn(`atlas overflow at ${key}`)
     x += box.w + pad
     shelf = Math.max(shelf, box.h)
   }
