@@ -68,6 +68,8 @@ function shadowShape(p: Prop) {
   if (p.key.startsWith("rock")) return { r: p.h * 0.5, top: 0.8, base: 0, dark: 0.5, cone: false }
   if (p.key.startsWith("bush")) return { r: p.h * 0.45, top: 1, base: 0, dark: 0.35, cone: false }
   if (p.key === "horse") return { r: 0.8, top: 0.7, base: 0, dark: 0.4, cone: false }
+  if (["shrine", "signpost", "well", "stones", "graves", "arch", "tower"].includes(p.key))
+    return { r: Math.min(3.5, 0.6 + p.h * 0.22), top: 0.9, base: 0, dark: 0.5, cone: false }
   return null
 }
 

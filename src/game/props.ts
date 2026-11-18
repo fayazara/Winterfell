@@ -4,6 +4,7 @@
  * placement is deterministic so the valley looks the same every visit.
  */
 import { contentBox, loadImage } from "./handImages"
+import { LANDMARKS } from "./regions"
 import { CASTLE_X, CASTLE_Y, CASTLE_Z, LAKE, WATER_Y, hash12, lakeE, lerp, pathX, smoothstep, terrainHeight } from "./world"
 
 const BASE = "/sprites/world/"
@@ -12,6 +13,7 @@ export const PROP_KEYS = [
   "pine_0", "pine_1", "pine_2", "tree_0", "tree_1",
   "bush_0", "bush_1", "bush_2", "rock_0", "rock_1",
   "cottage_0", "cottage_1", "castle", "horse", "campfire", "reeds",
+  "shrine", "signpost", "well", "stones", "graves", "arch", "tower",
 ] as const
 export type PropKey = (typeof PROP_KEYS)[number]
 
@@ -38,6 +40,13 @@ export async function buildAtlas(): Promise<Atlas> {
     horse: "/sprites/library/creatures/horse_brown.png",
     campfire: "/sprites/library/props/campfire.png",
     reeds: "/sprites/library/nature/tall_grass.png",
+    shrine: "/sprites/library/props/shrine.png",
+    signpost: "/sprites/library/props/signpost.png",
+    well: "/sprites/library/props/well.png",
+    stones: "/sprites/library/props/standing_stones.png",
+    graves: "/sprites/library/props/gravestones.png",
+    arch: "/sprites/library/props/ruined_arch.png",
+    tower: "/sprites/library/props/ruined_tower.png",
   }
   const url = (k: PropKey) => LIB[k] ?? `${BASE}${k}.png`
   const imgs = await Promise.all(PROP_KEYS.map((k) => loadImage(url(k))))
@@ -47,29 +56,36 @@ export async function buildAtlas(): Promise<Atlas> {
   const g = canvas.getContext("2d")!
   const entries = {} as Record<PropKey, AtlasEntry>
   // shelf packing, tallest first
-  const order = imgs.map((img, i) => ({ img, key: PROP_KEYS[i], box: contentBox(img) }))
-  order.sort((a, b) => b.box.h - a.box.h)
+  // library art is 512 px; 320 px is plenty at our resolution and keeps the atlas in bounds
+  const order = imgs.map((img, i) => {
+    const key = PROP_KEYS[i]
+    const box = contentBox(img)
+    const max = key === "castle" ? 768 : 320
+    const k = Math.min(1, max / Math.max(box.w, box.h))
+    return { img, key, box, w: Math.round(box.w * k), h: Math.round(box.h * k) }
+  })
+  order.sort((a, b) => b.h - a.h)
   let x = 0
   let y = 0
   let shelf = 0
   const pad = 2
-  for (const { img, key, box } of order) {
-    if (x + box.w + pad > ATLAS) {
+  for (const { img, key, box, w, h } of order) {
+    if (x + w + pad > ATLAS) {
       x = 0
       y += shelf + pad
       shelf = 0
     }
-    g.drawImage(img, box.x, box.y, box.w, box.h, x, y, box.w, box.h)
+    g.drawImage(img, box.x, box.y, box.w, box.h, x, y, w, h)
     entries[key] = {
       u0: x / ATLAS,
       v0: y / ATLAS,
-      u1: (x + box.w) / ATLAS,
-      v1: (y + box.h) / ATLAS,
-      aspect: box.w / box.h,
+      u1: (x + w) / ATLAS,
+      v1: (y + h) / ATLAS,
+      aspect: w / h,
     }
-    if (y + box.h > ATLAS) console.warn(`atlas overflow at ${key}`)
-    x += box.w + pad
-    shelf = Math.max(shelf, box.h)
+    if (y + h > ATLAS) console.warn(`atlas overflow at ${key}`)
+    x += w + pad
+    shelf = Math.max(shelf, h)
   }
   return { canvas, entries }
 }
@@ -95,7 +111,9 @@ const pick = <T,>(arr: readonly T[], r: number) => arr[Math.min(arr.length - 1, 
 export function placeProps(): Prop[] {
   const props: Prop[] = []
   const nearCastle = (x: number, z: number, r: number) =>
-    Math.hypot(x - CASTLE_X, z - CASTLE_Z) < r || lakeE(x, z) < 1.12
+    Math.hypot(x - CASTLE_X, z - CASTLE_Z) < r ||
+    lakeE(x, z) < 1.12 ||
+    LANDMARKS.some((l) => Math.hypot(x - l.x, z - l.z) < Math.max(4, l.h * 0.55))
   const ground = (x: number, z: number) => terrainHeight(x, z) - 0.35
 
   // trees: sparse meadows by the road, forest on the valley walls
@@ -188,6 +206,10 @@ export function placeProps(): Prop[] {
     if (y < WATER_Y - 0.3) continue
     props.push({ x, y: Math.max(y, WATER_Y) - 0.15, z, h: 1.1 + hash12(k, 2.7) * 0.8, key: "reeds", sway: 0.12, phase: k * 1.7, tint: hash12(k, 6.6) * 2 - 1 })
   }
+
+  // landmarks to discover
+  for (const l of LANDMARKS)
+    props.push({ x: l.x, y: terrainHeight(l.x, l.z) - 0.2, z: l.z, h: l.h, key: l.key, sway: 0, phase: 0 })
 
   // the castle on its crag
   props.push({ x: CASTLE_X, y: CASTLE_Y - 16, z: CASTLE_Z, h: 128, key: "castle", sway: 0, phase: 0 })

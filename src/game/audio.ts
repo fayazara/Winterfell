@@ -8,6 +8,8 @@
  *   crickets  — pulsed high tones at night
  *   fire      — low rumble + random crackles while camping
  *   steps     — soft thuds on each footfall, hoof clops on each gait beat
+ *   cues      — little interface chimes (after BRICKLAND's cue table)
+ *   music     — a slow generative harp over a soft drone, never the same twice
  *
  * Browsers only allow audio after a user gesture, so call unlock() from one.
  */
@@ -30,6 +32,28 @@ export interface AudioState {
 }
 
 const STORAGE_KEY = "winterfell-sound"
+const MUSIC_KEY = "winterfell-music"
+
+type Note = { f: number; f1?: number; at?: number; dur: number; gain: number; type?: OscillatorType }
+/** Short chimes: frequencies in Hz, offsets in seconds. */
+const CUES: Record<string, Note[]> = {
+  click: [{ f: 880, f1: 620, dur: 0.065, gain: 0.05, type: "triangle" }],
+  pause: [{ f: 523.25, dur: 0.15, gain: 0.05 }, { f: 392, at: 0.075, dur: 0.19, gain: 0.045 }],
+  resume: [{ f: 392, dur: 0.15, gain: 0.045 }, { f: 523.25, at: 0.075, dur: 0.22, gain: 0.05 }],
+  home: [{ f: 523.25, dur: 0.22, gain: 0.045 }, { f: 659.25, at: 0.09, dur: 0.24, gain: 0.04 }, { f: 783.99, at: 0.18, dur: 0.36, gain: 0.035 }],
+  region: [{ f: 783.99, dur: 0.3, gain: 0.022 }, { f: 1174.66, at: 0.12, dur: 0.4, gain: 0.016 }],
+  discover: [
+    { f: 587.33, dur: 0.4, gain: 0.04 },
+    { f: 880, at: 0.12, dur: 0.45, gain: 0.035 },
+    { f: 1174.66, at: 0.24, dur: 0.7, gain: 0.03 },
+    { f: 1396.91, at: 0.36, dur: 0.9, gain: 0.018 },
+  ],
+}
+
+/** D dorian, two octaves: the harp wanders over these. */
+const SCALE = [146.83, 164.81, 174.61, 196, 220, 246.94, 261.63, 293.66, 329.63, 349.23, 392, 440, 493.88, 523.25]
+/** drone roots it drifts between (D, F, C, G) */
+const ROOTS = [73.42, 87.31, 65.41, 98]
 
 export class Ambience {
   private ctx: AudioContext | null = null
@@ -48,10 +72,19 @@ export class Ambience {
   private cricketTimer = 1
   private lastBob = 0
   private lastRide = 0
+  private musicEnabled = true
+  private musicBus: GainNode | null = null
+  private delayIn: GainNode | null = null
+  private drone: OscillatorNode[] = []
+  private droneTimer = 0
+  private rootIndex = 0
+  private phraseTimer = 2
+  private noteIndex = 6
 
   constructor() {
     try {
       this.enabled = localStorage.getItem(STORAGE_KEY) !== "off"
+      this.musicEnabled = localStorage.getItem(MUSIC_KEY) !== "off"
     } catch {
       /* storage can be unavailable */
     }
@@ -59,6 +92,35 @@ export class Ambience {
 
   get on() {
     return this.enabled
+  }
+
+  get musicOn() {
+    return this.musicEnabled
+  }
+
+  setMusic(on: boolean) {
+    this.musicEnabled = on
+    try {
+      localStorage.setItem(MUSIC_KEY, on ? "on" : "off")
+    } catch {
+      /* ignore */
+    }
+    if (this.ctx && this.musicBus) this.musicBus.gain.setTargetAtTime(on ? 0.55 : 0, this.ctx.currentTime, 0.8)
+  }
+
+  /** Freeze everything while the game is paused. */
+  setPaused(paused: boolean) {
+    if (!this.ctx) return
+    // give the pause chime a moment to sound before suspending
+    if (paused) setTimeout(() => void this.ctx?.suspend(), 450)
+    else void this.ctx.resume()
+  }
+
+  cue(name: keyof typeof CUES | string) {
+    const ctx = this.ctx
+    if (!ctx || !this.master || ctx.state !== "running") return
+    const t = ctx.currentTime
+    for (const n of CUES[name] ?? []) this.tone(n.f, n.f1 ?? n.f * 0.995, t + (n.at ?? 0), n.dur, n.gain, n.type ?? "sine")
   }
 
   setEnabled(on: boolean) {
@@ -133,6 +195,85 @@ export class Ambience {
     this.fireGain.gain.value = 0
     rumble.connect(lp).connect(this.fireGain).connect(this.master)
     rumble.start(0, 1.3)
+
+    // music bus: a dry path plus a soft feedback echo for space
+    this.musicBus = ctx.createGain()
+    this.musicBus.gain.value = this.musicEnabled ? 0.55 : 0
+    this.musicBus.connect(this.master)
+    this.delayIn = ctx.createGain()
+    const delay = ctx.createDelay(1.5)
+    delay.delayTime.value = 0.46
+    const fb = ctx.createGain()
+    fb.gain.value = 0.38
+    const tone = ctx.createBiquadFilter()
+    tone.type = "lowpass"
+    tone.frequency.value = 1700
+    this.delayIn.connect(delay)
+    delay.connect(tone).connect(fb).connect(delay)
+    tone.connect(this.musicBus)
+    // the drone: two soft sines a fifth apart, breathing slowly
+    const droneGain = ctx.createGain()
+    droneGain.gain.value = 0.018
+    const lfo = ctx.createOscillator()
+    lfo.frequency.value = 0.07
+    const lfoAmt = ctx.createGain()
+    lfoAmt.gain.value = 0.008
+    lfo.connect(lfoAmt).connect(droneGain.gain)
+    lfo.start()
+    for (const mult of [1, 1.5]) {
+      const o = ctx.createOscillator()
+      o.type = "sine"
+      o.frequency.value = ROOTS[0] * mult
+      o.connect(droneGain)
+      o.start()
+      this.drone.push(o)
+    }
+    droneGain.connect(this.musicBus)
+  }
+
+  /** One plucked note: bright attack, long soft decay, into the echo. */
+  private pluck(f: number, at: number, gain: number) {
+    const ctx = this.ctx!
+    const o = ctx.createOscillator()
+    o.type = "triangle"
+    o.frequency.value = f
+    const o2 = ctx.createOscillator()
+    o2.type = "sine"
+    o2.frequency.value = f * 2.001
+    const lp = ctx.createBiquadFilter()
+    lp.type = "lowpass"
+    lp.frequency.setValueAtTime(f * 8, at)
+    lp.frequency.exponentialRampToValueAtTime(f * 2, at + 1.2)
+    const g = ctx.createGain()
+    g.gain.setValueAtTime(0, at)
+    g.gain.linearRampToValueAtTime(gain, at + 0.008)
+    g.gain.exponentialRampToValueAtTime(0.0001, at + 2.6)
+    const g2 = ctx.createGain()
+    g2.gain.value = 0.25
+    o.connect(lp)
+    o2.connect(g2).connect(lp)
+    lp.connect(g)
+    g.connect(this.musicBus!)
+    g.connect(this.delayIn!)
+    o.start(at)
+    o2.start(at)
+    o.stop(at + 2.7)
+    o2.stop(at + 2.7)
+  }
+
+  /** A short phrase that steps around the scale, sometimes leaping. */
+  private phrase(night: number) {
+    const t = this.ctx!.currentTime + 0.05
+    const notes = 2 + Math.floor(Math.random() * 4)
+    let at = t
+    for (let i = 0; i < notes; i++) {
+      const step = Math.random() < 0.15 ? (Math.random() < 0.5 ? -3 : 3) : Math.random() < 0.5 ? -1 : 1
+      this.noteIndex = Math.max(1, Math.min(SCALE.length - 1, this.noteIndex + step))
+      // a little lower and slower at night
+      const f = SCALE[this.noteIndex] * (night > 0.6 ? 0.5 : 1)
+      this.pluck(f, at, 0.05 - i * 0.006)
+      at += (0.32 + Math.random() * 0.36) * (1 + night * 0.4)
+    }
   }
 
   update(dt: number, s: AudioState) {
@@ -151,6 +292,23 @@ export class Ambience {
     const windLevel = 0.012 + s.wind * 0.018 * (0.5 + this.gust) + sp * sp * 0.09
     this.windGain!.gain.setTargetAtTime(windLevel, now, 0.3)
     this.windFilter!.frequency.setTargetAtTime(380 + this.gust * 300 + sp * 1600, now, 0.3)
+
+    // music: phrases with long rests; the drone shifts root now and then
+    if (this.musicEnabled) {
+      this.phraseTimer -= dt
+      if (this.phraseTimer <= 0) {
+        this.phraseTimer = 3.5 + Math.random() * 5
+        this.phrase(s.night)
+      }
+      this.droneTimer -= dt
+      if (this.droneTimer <= 0) {
+        this.droneTimer = 18 + Math.random() * 14
+        this.rootIndex = (this.rootIndex + 1 + Math.floor(Math.random() * 2)) % ROOTS.length
+        const r = ROOTS[this.rootIndex]
+        this.drone[0]?.frequency.setTargetAtTime(r, now, 3)
+        this.drone[1]?.frequency.setTargetAtTime(r * 1.5, now, 3)
+      }
+    }
 
     // fire
     this.fireGain!.gain.setTargetAtTime(s.camping ? 0.05 : 0, now, 0.6)

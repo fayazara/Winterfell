@@ -22,6 +22,7 @@ import { HAND_IMAGES, buildHandSprite, loadImage, type HandSprite } from "./hand
 import { SKY_URL, buildAtlas, placeProps, type Atlas, type Prop } from "./props"
 import { GROUND, bakeAO, bakeHeights, bakeShadows, packGround } from "./groundMap"
 import { Ambience } from "./audio"
+import { DISCOVER_RADIUS, LANDMARKS, regionAt, type Landmark } from "./regions"
 import { DAWN_ID, NIGHT_ID, PRESETS, type Environment, type Preset, type Tweaks } from "./presets"
 import {
   CASTLE_X,
@@ -64,6 +65,14 @@ export interface EngineCallbacks {
   /** the engine moved to another preset on its own (night falls, dawn) */
   onPreset?: (id: string) => void
   onSound?: (on: boolean) => void
+  onMusic?: (on: boolean) => void
+  /** entered a named part of the valley */
+  onRegion?: (name: string) => void
+  /** found a landmark for the first time */
+  onDiscover?: (landmark: Landmark, found: number, total: number) => void
+  /** everything has loaded: lift the intro */
+  onReady?: () => void
+  onPause?: (paused: boolean) => void
 }
 
 type Prog = { p: WebGLProgram; u: Map<string, WebGLUniformLocation | null> }
@@ -190,6 +199,13 @@ export class Engine {
   private groundSun: number[] | null = null
   private groundTimer = 0
   private audio = new Ambience()
+  private heights: Float32Array | null = null
+  private paused = false
+  private region = ""
+  private regionTimer = 0
+  private discovered = new Set<string>()
+  private loaded = { hands: false, atlas: false, sky: false, ground: false }
+  private readySent = false
   private keys = new Set<string>()
   private fade = 0
   private looping = false
@@ -252,7 +268,16 @@ export class Engine {
     this.envFrom = p.env
     this.envTo = p.env
     this.settings = { pixelHeight: 400, ...p.tweaks, autoWalk: true, riding: false, grade: true, sound: this.audio.on }
-    queueMicrotask(() => this.cb.onSound?.(this.audio.on))
+    queueMicrotask(() => {
+      this.cb.onSound?.(this.audio.on)
+      this.cb.onMusic?.(this.audio.musicOn)
+    })
+    try {
+      const saved = JSON.parse(localStorage.getItem("winterfell-found") ?? "[]") as string[]
+      for (const id of saved) this.discovered.add(id)
+    } catch {
+      /* no storage */
+    }
     this.parkHorse(pathX(PATH_START_Z - 7) + 2.6, PATH_START_Z - 7)
 
     this.camY = terrainHeight(this.pos.x, this.pos.z) + EYE
@@ -286,8 +311,12 @@ export class Engine {
         if (this.destroyed) return
         this.handImgs = { torch, sword, horse }
         this.rebuildHands(true)
+        this.markLoaded("hands")
       })
-      .catch((err) => console.warn("hand images unavailable, using procedural hands", err))
+      .catch((err) => {
+        console.warn("hand images unavailable, using procedural hands", err)
+        this.markLoaded("hands")
+      })
     buildAtlas()
       .then((atlas) => {
         if (this.destroyed) return
@@ -308,8 +337,12 @@ export class Engine {
         this.bbData = new Float32Array((this.props.length + 2) * BB_FLOATS)
         this.propOrder = new Int32Array(this.props.length + 2)
         this.propDist = new Float32Array(this.props.length + 2)
+        this.markLoaded("atlas")
       })
-      .catch((err) => console.warn("world props unavailable, using procedural trees", err))
+      .catch((err) => {
+        console.warn("world props unavailable, using procedural trees", err)
+        this.markLoaded("atlas")
+      })
     loadImage(SKY_URL)
       .then((img) => {
         if (this.destroyed) return
@@ -322,14 +355,20 @@ export class Engine {
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
         this.skyTex = tex
+        this.markLoaded("sky")
       })
-      .catch((err) => console.warn("painted sky unavailable", err))
+      .catch((err) => {
+        console.warn("painted sky unavailable", err)
+        this.markLoaded("sky")
+      })
     this.last = performance.now()
     this.raf = requestAnimationFrame(this.frame)
     // ground occlusion takes ~100 ms of CPU; do it after the first frame
     setTimeout(() => {
       if (this.destroyed) return
-      this.groundAO = bakeAO(bakeHeights())
+      this.heights = bakeHeights()
+      this.groundAO = bakeAO(this.heights)
+      this.markLoaded("ground")
     }, 50)
   }
 
@@ -389,6 +428,85 @@ export class Engine {
     this.cb.onCamp?.(on)
   }
 
+  private markLoaded(part: keyof Engine["loaded"]) {
+    this.loaded[part] = true
+    if (!this.readySent && Object.values(this.loaded).every(Boolean)) {
+      this.readySent = true
+      // let the first frame with everything in it render before the reveal
+      requestAnimationFrame(() => requestAnimationFrame(() => this.cb.onReady?.()))
+    }
+  }
+
+  /** Live readings for the HUD and the minimap. */
+  status() {
+    return {
+      x: this.pos.x,
+      z: this.pos.z,
+      yaw: this.yaw + this.lookOffset.yaw,
+      speed: this.settings.riding ? Math.abs(this.rideSpeed) : this.moving * (this.settings.autoWalk ? 1.5 : 2.2),
+      region: this.region,
+      found: this.discovered.size,
+      total: LANDMARKS.length,
+      paused: this.paused,
+    }
+  }
+
+  /** Static data the minimap is drawn from (null until baked). */
+  mapData() {
+    return this.heights && this.props.length ? { heights: this.heights, props: this.props } : null
+  }
+
+  isFound(id: string) {
+    return this.discovered.has(id)
+  }
+
+  togglePause(force?: boolean) {
+    this.paused = force ?? !this.paused
+    this.keys.clear()
+    this.audio.cue(this.paused ? "pause" : "resume")
+    this.audio.setPaused(this.paused)
+    this.cb.onPause?.(this.paused)
+  }
+
+  /** Back to where the road begins, through a fade. */
+  goHome() {
+    if (this.camping) this.setCamp(false)
+    this.looping = true
+    this.audio.cue("home")
+  }
+
+  setMusic(on: boolean) {
+    this.audio.setMusic(on)
+    this.cb.onMusic?.(on)
+  }
+
+  uiCue() {
+    this.audio.unlock()
+    this.audio.cue("click")
+  }
+
+  private checkPlaces() {
+    const r = regionAt(this.pos.x, this.pos.z)
+    if (r !== this.region) {
+      const first = this.region === ""
+      this.region = r
+      this.cb.onRegion?.(r)
+      if (!first) this.audio.cue("region")
+    }
+    for (const l of LANDMARKS) {
+      if (this.discovered.has(l.id)) continue
+      if (Math.hypot(this.pos.x - l.x, this.pos.z - l.z) > DISCOVER_RADIUS) continue
+      this.discovered.add(l.id)
+      try {
+        localStorage.setItem("winterfell-found", JSON.stringify([...this.discovered]))
+      } catch {
+        /* no storage */
+      }
+      this.audio.cue("discover")
+      this.cb.onDiscover?.(l, this.discovered.size, LANDMARKS.length)
+    }
+  }
+
   get isCamping() {
     return this.camping
   }
@@ -417,6 +535,12 @@ export class Engine {
       e.preventDefault()
       if (this.settings.autoWalk) this.setAutoWalk(false)
     }
+    if (e.code === "Space") {
+      e.preventDefault()
+      this.togglePause()
+      return
+    }
+    if (this.paused) return
     if (e.code === "KeyR") this.setAutoWalk(!this.settings.autoWalk)
     if (e.code === "KeyH" && !this.camping) this.setRiding(!this.settings.riding)
     if (e.code === "KeyC") this.setCamp(!this.camping)
@@ -432,7 +556,11 @@ export class Engine {
   private onBlur = () => this.keys.clear()
   private onClick = () => {
     this.audio.unlock()
-    if (document.pointerLockElement !== this.canvas) this.canvas.requestPointerLock?.()
+    if (document.pointerLockElement !== this.canvas) {
+      // Chrome refuses a re-lock right after Esc; that is fine, just try again later
+      const p = this.canvas.requestPointerLock?.() as Promise<void> | undefined
+      p?.catch?.(() => {})
+    }
   }
   private dragging: { x: number; y: number; id: number } | null = null
   private onPointerDown = (e: PointerEvent) => {
@@ -628,6 +756,11 @@ export class Engine {
     const s = this.settings
     let speed = 0
 
+    this.regionTimer -= dt
+    if (this.regionTimer <= 0) {
+      this.regionTimer = 0.25
+      this.checkPlaces()
+    }
     this.groundTimer -= dt
     if (this.groundTimer <= 0) {
       this.groundTimer = 0.35
@@ -760,10 +893,10 @@ export class Engine {
   private frame = (now: number) => {
     const dt = Math.min((now - this.last) / 1000, 0.05)
     this.last = now
-    this.update(dt)
+    if (!this.paused) this.update(dt)
     this.render()
     const env = this.currentEnv()
-    this.audio.update(dt, {
+    if (!this.paused) this.audio.update(dt, {
       speed: this.settings.riding ? Math.abs(this.rideSpeed) : this.moving * (this.settings.autoWalk ? 1.5 : 2.2),
       riding: this.settings.riding && this.mountT > 0.5,
       gallop: this.gallop,
@@ -853,7 +986,8 @@ export class Engine {
       right[0] * fwd[1] - right[1] * fwd[0],
     ]
     const cam = [this.pos.x + right[0] * sway, this.camY + bob, this.pos.z + right[2] * sway]
-    const tanHalf = Math.tan(FOV / 2)
+    // a touch wider at a gallop: speed you can feel
+    const tanHalf = Math.tan((FOV + this.gallop * this.moving * mt * ((7 * Math.PI) / 180)) / 2)
 
     // sprite layout (low-res pixels, top-left origin)
     const ss = this.spriteK
