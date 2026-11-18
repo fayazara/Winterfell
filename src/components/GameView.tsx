@@ -21,23 +21,24 @@ interface Toast {
   line?: string
 }
 
-/**
- * Cloud clumps for the opening veil (after BRICKLAND's cloud-break), in
- * fractions of the screen: x, y, radius, and the direction each drifts.
- */
-const PUFFS: [number, number, number, number, number][] = [
-  [0.16, 0.24, 0.26, -0.8, -0.6], [0.5, 0.12, 0.28, 0.05, -1], [0.86, 0.22, 0.25, 0.85, -0.5],
-  [0.06, 0.52, 0.24, -1, 0.05], [0.32, 0.46, 0.2, -0.7, -0.1], [0.7, 0.48, 0.2, 0.7, 0.05],
-  [0.96, 0.56, 0.25, 1, 0.1], [0.18, 0.82, 0.26, -0.7, 0.8], [0.52, 0.9, 0.3, 0.1, 1], [0.86, 0.8, 0.25, 0.8, 0.8],
-]
-const SKY_BANDS = ["#2e2068", "#3a2870", "#4a2e86", "#5c3a9e", "#7048b4", "#8a5cc8", "#b83a7a", "#e0548a", "#f27aa0"]
-const CLOUD = { lit: "#fcc8cc", mid: "#f8a0b4", shade: "#c49ae6", deep: "#8a5cc8" }
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5]
 
-/** A low-res canvas (1 px = 6 screen px) so the veil shares the game's pixel grid. */
+/**
+ * The opening: the game's own painted sky, pixelated onto the game's grid
+ * (1 px = 6 screen px), dimmed at the edges. When the valley is ready it
+ * dissolves away through an ordered-dither pattern, the classic pixel-art
+ * transition, instead of a fade.
+ */
 function PixelVeil({ revealing }: { revealing: boolean }) {
   const ref = useRef<HTMLCanvasElement>(null)
   const start = useRef<number | null>(null)
+  const img = useRef<HTMLImageElement | null>(null)
   useEffect(() => {
+    if (!img.current) {
+      const i = new Image()
+      i.src = "/sprites/world/sky.jpg"
+      img.current = i
+    }
     let raf = 0
     const draw = (now: number) => {
       raf = requestAnimationFrame(draw)
@@ -50,49 +51,40 @@ function PixelVeil({ revealing }: { revealing: boolean }) {
         c.height = H
       }
       const g = c.getContext("2d")!
-      if (revealing && start.current === null) start.current = now
-      const raw = start.current === null ? 0 : Math.min(1, (now - start.current - 200) / 1250)
-      const t = raw <= 0 ? 0 : raw < 0.5 ? 4 * raw ** 3 : 1 - (-2 * raw + 2) ** 3 / 2
-      // stepped dusk sky
-      g.globalCompositeOperation = "source-over"
-      const band = Math.ceil(H / SKY_BANDS.length)
-      SKY_BANDS.forEach((col, i) => {
-        g.fillStyle = col
-        g.fillRect(0, i * band, W, band)
-      })
-      // slow idle drift while loading, then everything flies outward
-      const bob = Math.sin(now / 900) * 0.6
-      const blob = (x: number, y: number, r: number, col: string) => {
-        g.fillStyle = col
-        g.beginPath()
-        g.arc(Math.round(x), Math.round(y), Math.max(1, Math.round(r)), 0, Math.PI * 2)
-        g.fill()
+      g.imageSmoothingEnabled = true
+      g.fillStyle = "#1a1030"
+      g.fillRect(0, 0, W, H)
+      const sky = img.current
+      if (sky?.complete && sky.naturalWidth) {
+        // cover the screen, with a slow drift so it feels alive while loading
+        const k = Math.max(W / sky.naturalWidth, H / sky.naturalHeight) * 1.08
+        const dw = sky.naturalWidth * k
+        const dh = sky.naturalHeight * k
+        const drift = Math.sin(now / 4000) * (dw - W) * 0.3
+        g.drawImage(sky, (W - dw) / 2 + drift, (H - dh) / 2, dw, dh)
       }
-      for (const [fx, fy, fr, dx, dy] of PUFFS) {
-        // a cumulus: a row of bumps on a flat base, shadowed underneath, lit on top
-        const s = Math.min(W, H) * fr * (1 + t * 0.45)
-        const x = fx * W + dx * t * W * 0.55
-        const y = fy * H + dy * t * H * 0.55 + bob
-        const bumps: [number, number, number][] = [[-0.9, 0.15, 0.42], [-0.45, -0.12, 0.55], [0.05, -0.28, 0.66], [0.55, -0.1, 0.52], [0.95, 0.12, 0.4]]
-        const layer = (oy: number, grow: number, col: string) => {
-          for (const [bx, by, br] of bumps) blob(x + bx * s, y + by * s + oy, br * s + grow, col)
-          g.fillStyle = col
-          g.fillRect(Math.round(x - s * 1.2), Math.round(y + oy), Math.round(s * 2.4), Math.round(s * 0.32))
+      // dusk vignette in hard dithered steps
+      for (let y = 0; y < H; y++)
+        for (let x = 0; x < W; x++) {
+          const dx = x / W - 0.5
+          const dy = y / H - 0.5
+          const v = (dx * dx + dy * dy) * 3.2
+          if ((BAYER[(y & 3) * 4 + (x & 3)] + 0.5) / 16 < v - 0.35) {
+            g.fillStyle = "rgba(14, 8, 30, 0.85)"
+            g.fillRect(x, y, 1, 1)
+          }
         }
-        layer(s * 0.16, 0, CLOUD.deep)
-        layer(s * 0.07, 0, CLOUD.shade)
-        layer(0, -1, CLOUD.mid)
-        // sun-lit crowns, offset up and to the right
-        for (const [bx, by, br] of bumps) blob(x + bx * s + s * 0.06, y + by * s - s * 0.08, br * s * 0.72, CLOUD.lit)
-      }
-      // the hole opens from the centre in chunky steps
-      if (t > 0) {
-        g.globalCompositeOperation = "destination-out"
-        const r = Math.round(t * Math.hypot(W, H) * 0.75)
-        g.beginPath()
-        g.arc(Math.round(W * 0.5), Math.round(H * 0.46), r, 0, Math.PI * 2)
-        g.fill()
-        g.globalCompositeOperation = "source-over"
+      // reveal: clear cells whose Bayer threshold the wipe has passed,
+      // sweeping outward from the centre so it opens like a window
+      if (revealing && start.current === null) start.current = now
+      if (start.current !== null) {
+        const t = Math.min(1, (now - start.current) / 1100)
+        for (let y = 0; y < H; y++)
+          for (let x = 0; x < W; x++) {
+            const d = Math.hypot(x / W - 0.5, (y / H - 0.5) * (H / W)) * 1.6
+            const th = (BAYER[(y & 3) * 4 + (x & 3)] + 0.5) / 16
+            if (t * 1.6 - d > th) g.clearRect(x, y, 1, 1)
+          }
       }
     }
     raf = requestAnimationFrame(draw)
@@ -461,7 +453,8 @@ export function GameView() {
         <div className={`cloud-veil ${veil === "revealing" ? "is-revealing" : ""}`} aria-hidden="true">
           <PixelVeil revealing={veil === "revealing"} />
           <div className="hud-glass loading-card" role="status">
-            <span className="eyebrow">A LONG ROAD, AND NO HURRY</span>
+            <div className="veil-title">WINTERFELL</div>
+            <span className="eyebrow">A long road, and no hurry</span>
             <h2>The valley is waking</h2>
             <p>{stage}</p>
             <div className="loading-track">

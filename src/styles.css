@@ -149,6 +149,7 @@
 .loading-track i { display: block; width: 30%; height: 100%; background: repeating-linear-gradient(90deg, #f0b030 0 6px, #9a5428 6px 8px); animation: growing 1.2s steps(12) infinite; }
 @keyframes growing { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 .is-revealing .loading-card { animation: lift-away 0.3s steps(3) forwards; }
+.loading-card .veil-title { font-size: 30px; letter-spacing: 3px; color: #f8d050; text-shadow: 2px 2px 0 #9a5428, 4px 4px 0 #08060e; margin: 4px 0 2px; }
 @keyframes lift-away { to { opacity: 0; visibility: hidden; transform: translate(-50%, -62%); } }
 
 @media (max-width: 760px) {
