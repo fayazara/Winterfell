@@ -10,11 +10,17 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as AssetsRouteImport } from './routes/assets'
 import { Route as ApiHelloRouteImport } from './routes/api/hello'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AssetsRoute = AssetsRouteImport.update({
+  id: '/assets',
+  path: '/assets',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiHelloRoute = ApiHelloRouteImport.update({
@@ -25,27 +31,31 @@ const ApiHelloRoute = ApiHelloRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/assets': typeof AssetsRoute
   '/api/hello': typeof ApiHelloRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/assets': typeof AssetsRoute
   '/api/hello': typeof ApiHelloRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/assets': typeof AssetsRoute
   '/api/hello': typeof ApiHelloRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/api/hello'
+  fullPaths: '/' | '/assets' | '/api/hello'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/api/hello'
-  id: '__root__' | '/' | '/api/hello'
+  to: '/' | '/assets' | '/api/hello'
+  id: '__root__' | '/' | '/assets' | '/api/hello'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  AssetsRoute: typeof AssetsRoute
   ApiHelloRoute: typeof ApiHelloRoute
 }
 
@@ -56,6 +66,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/assets': {
+      id: '/assets'
+      path: '/assets'
+      fullPath: '/assets'
+      preLoaderRoute: typeof AssetsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/hello': {
@@ -70,6 +87,7 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  AssetsRoute: AssetsRoute,
   ApiHelloRoute: ApiHelloRoute,
 }
 export const routeTree = rootRouteImport

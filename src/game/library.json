@@ -1,0 +1,302 @@
+[
+  {
+    "category": "creatures",
+    "name": "horse_brown",
+    "size": "1536x1024",
+    "description": "Saddled brown warhorse, side view"
+  },
+  {
+    "category": "creatures",
+    "name": "horse_white",
+    "size": "1536x1024",
+    "description": "Saddled grey-white horse, three-quarter view"
+  },
+  {
+    "category": "creatures",
+    "name": "horse_front",
+    "size": "1024x1536",
+    "description": "Horse seen head-on, for meeting it on the road"
+  },
+  {
+    "category": "creatures",
+    "name": "crow",
+    "size": "1024x1024",
+    "description": "Crow perched, omen bird"
+  },
+  {
+    "category": "creatures",
+    "name": "deer",
+    "size": "1536x1024",
+    "description": "Stag in side view"
+  },
+  {
+    "category": "people",
+    "name": "villager_farmer",
+    "size": "1024x1536",
+    "description": "Farmer villager with pitchfork"
+  },
+  {
+    "category": "people",
+    "name": "villager_woman",
+    "size": "1024x1536",
+    "description": "Village woman with basket"
+  },
+  {
+    "category": "people",
+    "name": "merchant",
+    "size": "1024x1536",
+    "description": "Travelling merchant with pack"
+  },
+  {
+    "category": "people",
+    "name": "guard",
+    "size": "1024x1536",
+    "description": "Castle guard with spear and shield"
+  },
+  {
+    "category": "people",
+    "name": "hermit",
+    "size": "1024x1536",
+    "description": "Old hermit sage with staff"
+  },
+  {
+    "category": "people",
+    "name": "hooded_stranger",
+    "size": "1024x1536",
+    "description": "Mysterious hooded stranger"
+  },
+  {
+    "category": "people",
+    "name": "knight_rival",
+    "size": "1024x1536",
+    "description": "Black knight, rival"
+  },
+  {
+    "category": "enemies",
+    "name": "wolf",
+    "size": "1536x1024",
+    "description": "Snarling grey wolf"
+  },
+  {
+    "category": "enemies",
+    "name": "bandit",
+    "size": "1024x1536",
+    "description": "Bandit with dagger"
+  },
+  {
+    "category": "enemies",
+    "name": "skeleton",
+    "size": "1024x1536",
+    "description": "Skeleton warrior"
+  },
+  {
+    "category": "enemies",
+    "name": "wraith",
+    "size": "1024x1536",
+    "description": "Floating wraith spirit"
+  },
+  {
+    "category": "enemies",
+    "name": "troll",
+    "size": "1024x1536",
+    "description": "Hulking forest troll"
+  },
+  {
+    "category": "enemies",
+    "name": "giant_spider",
+    "size": "1536x1024",
+    "description": "Giant cave spider"
+  },
+  {
+    "category": "props",
+    "name": "campfire",
+    "size": "1024x1024",
+    "description": "Campfire with logs and stones"
+  },
+  {
+    "category": "props",
+    "name": "tent",
+    "size": "1536x1024",
+    "description": "Traveller's canvas tent"
+  },
+  {
+    "category": "props",
+    "name": "signpost",
+    "size": "1024x1536",
+    "description": "Wooden crossroads signpost"
+  },
+  {
+    "category": "props",
+    "name": "shrine",
+    "size": "1024x1536",
+    "description": "Roadside stone shrine"
+  },
+  {
+    "category": "props",
+    "name": "standing_stones",
+    "size": "1536x1024",
+    "description": "Ancient standing stones"
+  },
+  {
+    "category": "props",
+    "name": "ruined_arch",
+    "size": "1024x1536",
+    "description": "Ruined gothic arch"
+  },
+  {
+    "category": "props",
+    "name": "well",
+    "size": "1024x1024",
+    "description": "Village stone well"
+  },
+  {
+    "category": "props",
+    "name": "cart",
+    "size": "1536x1024",
+    "description": "Wooden merchant cart"
+  },
+  {
+    "category": "props",
+    "name": "lantern_post",
+    "size": "1024x1536",
+    "description": "Iron lantern post"
+  },
+  {
+    "category": "props",
+    "name": "chest",
+    "size": "1024x1024",
+    "description": "Treasure chest"
+  },
+  {
+    "category": "props",
+    "name": "gravestones",
+    "size": "1536x1024",
+    "description": "Cluster of old gravestones"
+  },
+  {
+    "category": "props",
+    "name": "banner",
+    "size": "1024x1536",
+    "description": "Banner on a pole"
+  },
+  {
+    "category": "props",
+    "name": "haystack",
+    "size": "1024x1024",
+    "description": "Haystack"
+  },
+  {
+    "category": "props",
+    "name": "fence",
+    "size": "1536x1024",
+    "description": "Wooden fence section"
+  },
+  {
+    "category": "props",
+    "name": "bridge",
+    "size": "1536x1024",
+    "description": "Small stone bridge"
+  },
+  {
+    "category": "props",
+    "name": "ruined_tower",
+    "size": "1024x1536",
+    "description": "Ruined watchtower"
+  },
+  {
+    "category": "nature",
+    "name": "dead_tree",
+    "size": "1024x1536",
+    "description": "Gnarled dead tree"
+  },
+  {
+    "category": "nature",
+    "name": "birch",
+    "size": "1024x1536",
+    "description": "Birch tree"
+  },
+  {
+    "category": "nature",
+    "name": "mushrooms",
+    "size": "1024x1024",
+    "description": "Mushroom cluster"
+  },
+  {
+    "category": "nature",
+    "name": "tall_grass",
+    "size": "1536x1024",
+    "description": "Tall grass and reeds"
+  },
+  {
+    "category": "nature",
+    "name": "willow",
+    "size": "1024x1536",
+    "description": "Weeping willow"
+  },
+  {
+    "category": "items",
+    "name": "icon_sword",
+    "size": "1024x1024",
+    "description": "Sword icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_torch",
+    "size": "1024x1024",
+    "description": "Torch icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_potion_red",
+    "size": "1024x1024",
+    "description": "Health potion icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_potion_blue",
+    "size": "1024x1024",
+    "description": "Mana potion icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_key",
+    "size": "1024x1024",
+    "description": "Old iron key icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_map",
+    "size": "1024x1024",
+    "description": "Map scroll icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_shield",
+    "size": "1024x1024",
+    "description": "Shield icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_coins",
+    "size": "1024x1024",
+    "description": "Coin pouch icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_amulet",
+    "size": "1024x1024",
+    "description": "Amulet icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_bread",
+    "size": "1024x1024",
+    "description": "Bread icon"
+  },
+  {
+    "category": "items",
+    "name": "icon_horseshoe",
+    "size": "1024x1024",
+    "description": "Horseshoe icon"
+  }
+]
