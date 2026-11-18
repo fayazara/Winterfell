@@ -2,9 +2,19 @@
 @import "@cloudflare/kumo/styles/tailwind";
 @import "tailwindcss";
 @import "@fontsource-variable/inter";
+@import "@fontsource/pixelify-sans";
 
 @layer base {
   html {
     font-family: "Inter Variable", sans-serif;
   }
+}
+
+
+.pixel-ui {
+  font-family: "Pixelify Sans", ui-monospace, monospace;
+  -webkit-font-smoothing: none;
+}
+.pixel-ui canvas {
+  image-rendering: pixelated;
 }
