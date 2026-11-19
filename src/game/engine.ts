@@ -1329,7 +1329,8 @@ export class Engine {
     const gait = lerp(Math.sin(rp * 2), Math.sin(rp) * 0.75 + Math.sin(rp * 2) * 0.25, this.gallop)
     const bob = lerp(Math.sin(this.bobPhase * 2) * 0.035 * this.moving, gait * gaitAmp, mt)
     const sway = lerp(Math.sin(this.bobPhase) * 0.012 * this.moving, Math.sin(rp) * 0.01 * this.moving, mt)
-    const breathe = Math.sin(this.time * 1.4) * 0.006
+    // sitting by the fire the view is nearly still, so the stars stay put
+    const breathe = Math.sin(this.time * 1.4) * 0.006 * (1 - ct * 0.9)
     const rock = Math.sin(rp + 0.8) * gaitAmp * 0.22 * mt
     const yaw = this.yaw + this.lookOffset.yaw + sway * 0.3
     const pitch = this.pitch + this.lookOffset.pitch + breathe + rock

@@ -343,12 +343,19 @@ vec3 sky(vec3 rd){
   if (rd.y < m) col = mix(col, mix(uHaze, uHorizon, .5), .7);
   // stars, behind thin cloud
   if (uStars > 0. && rd.y > .03){
-    vec3 sp = floor(rd * 210.);
+    // stars sit at the centres of sky cells about two pixels wide and are drawn
+    // only on the pixel nearest that centre, so a swaying camera doesn't make
+    // them pop in and out; the twinkle is a slow breathe, not a flicker
+    vec3 sp = floor(rd * 120.);
     float h = hash13(sp);
-    if (h > .9955){
-      float tw = .55 + .45 * sin(uTime * (1.3 + h * 37.) + h * 90.);
-      float big = h > .9992 ? 1.7 : .75;
-      col += vec3(.85, .88, 1.) * tw * big * uStars * smoothstep(.03, .25, rd.y);
+    if (h > .985){
+      vec3 centre = normalize((sp + .5) / 120.);
+      float pix = 2. * uTanHalfFov / uRes.y;
+      if (acos(clamp(dot(rd, centre), -1., 1.)) < pix * .75){
+        float tw = .8 + .2 * sin(uTime * (.4 + fract(h * 97.) * 1.2) + h * 90.);
+        float big = h > .997 ? 1.7 : 1.05;
+        col += vec3(.85, .88, 1.) * tw * big * uStars * smoothstep(.03, .25, rd.y);
+      }
     }
     // a faint milky band
     float mband = exp(-pow((rd.y - .55 - .25 * sin(az * 1.3)) / .12, 2.));
