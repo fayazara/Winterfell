@@ -5,7 +5,7 @@
  */
 import { contentBox, loadImage } from "./handImages"
 import { LANDMARKS } from "./regions"
-import { CASTLE_X, CASTLE_Y, CASTLE_Z, LAKE, WATER_Y, hash12, lakeE, lerp, pathX, smoothstep, terrainHeight } from "./world"
+import { CASTLE_X, CASTLE_Y, CASTLE_Z, COURT, COURT_Y, LAKE, WATER_Y, hash12, lakeE, lerp, pathX, smoothstep, terrainHeight } from "./world"
 
 const BASE = "/sprites/world/"
 
@@ -14,6 +14,8 @@ export const PROP_KEYS = [
   "bush_0", "bush_1", "bush_2", "rock_0", "rock_1",
   "cottage_0", "cottage_1", "castle", "horse", "campfire", "reeds",
   "shrine", "signpost", "well", "stones", "graves", "arch", "tower",
+  "hermit", "merchant", "farmer", "woman", "guard", "stranger", "lamplighter",
+  "fountain", "keepdoor", "lantern", "banner", "cart", "haystack",
 ] as const
 export type PropKey = (typeof PROP_KEYS)[number]
 
@@ -47,6 +49,16 @@ export async function buildAtlas(): Promise<Atlas> {
     graves: "/sprites/library/props/gravestones.png",
     arch: "/sprites/library/props/ruined_arch.png",
     tower: "/sprites/library/props/ruined_tower.png",
+    hermit: "/sprites/library/people/hermit.png",
+    merchant: "/sprites/library/people/merchant.png",
+    farmer: "/sprites/library/people/villager_farmer.png",
+    woman: "/sprites/library/people/villager_woman.png",
+    guard: "/sprites/library/people/guard.png",
+    stranger: "/sprites/library/people/hooded_stranger.png",
+    lantern: "/sprites/library/props/lantern_post.png",
+    banner: "/sprites/library/props/banner.png",
+    cart: "/sprites/library/props/cart.png",
+    haystack: "/sprites/library/props/haystack.png",
   }
   const url = (k: PropKey) => LIB[k] ?? `${BASE}${k}.png`
   const imgs = await Promise.all(PROP_KEYS.map((k) => loadImage(url(k))))
@@ -60,7 +72,8 @@ export async function buildAtlas(): Promise<Atlas> {
   const order = imgs.map((img, i) => {
     const key = PROP_KEYS[i]
     const box = contentBox(img)
-    const max = key === "castle" ? 768 : 320
+    // keep the atlas within 2048²: big set pieces get more pixels than small props
+    const max = key === "castle" ? 768 : ["tower", "arch", "keepdoor", "cottage_0", "cottage_1"].includes(key) ? 320 : 256
     const k = Math.min(1, max / Math.max(box.w, box.h))
     return { img, key, box, w: Math.round(box.w * k), h: Math.round(box.h * k) }
   })
@@ -210,6 +223,17 @@ export function placeProps(): Prop[] {
   // landmarks to discover
   for (const l of LANDMARKS)
     props.push({ x: l.x, y: terrainHeight(l.x, l.z) - 0.2, z: l.z, h: l.h, key: l.key, sway: 0, phase: 0 })
+
+  // the courtyard: fountain, keep door, lamps, banners, a cart and some hay
+  const S = COURT.size
+  const court = (dx: number, dz: number, h: number, key: PropKey, sway = 0) =>
+    props.push({ x: COURT.x + dx, y: COURT_Y - 0.05, z: COURT.z + dz, h, key, sway, phase: dx * 3 + dz })
+  court(0, 0, 3.4, "fountain")
+  court(0, -S + 0.4, 10, "keepdoor")
+  for (const [dx, dz] of [[-9, -9], [9, -9], [-9, 9], [9, 9]]) court(dx, dz, 3.4, "lantern")
+  for (const dx of [-15, -6, 6, 15]) court(dx, -S + 0.6, 7.5, "banner", 0.15)
+  court(15, 9, 2.6, "cart")
+  court(-15, 11, 2.2, "haystack")
 
   // the castle on its crag
   props.push({ x: CASTLE_X, y: CASTLE_Y - 16, z: CASTLE_Z, h: 128, key: "castle", sway: 0, phase: 0 })

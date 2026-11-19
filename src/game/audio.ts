@@ -29,6 +29,8 @@ export interface AudioState {
   night: number
   /** wind slider */
   wind: number
+  /** 0 dry … 1 pouring */
+  rain?: number
 }
 
 const STORAGE_KEY = "winterfell-sound"
@@ -61,6 +63,8 @@ export class Ambience {
   private windGain: GainNode | null = null
   private windFilter: BiquadFilterNode | null = null
   private fireGain: GainNode | null = null
+  private rainGain: GainNode | null = null
+  private dripTimer = 0
   private noise: AudioBuffer | null = null
   private white: AudioBuffer | null = null
   private enabled = true
@@ -196,6 +200,21 @@ export class Ambience {
     rumble.connect(lp).connect(this.fireGain).connect(this.master)
     rumble.start(0, 1.3)
 
+    // rain: bright filtered noise, plus random drips scheduled in update()
+    const rain = ctx.createBufferSource()
+    rain.buffer = this.noise
+    rain.loop = true
+    const rhp = ctx.createBiquadFilter()
+    rhp.type = "highpass"
+    rhp.frequency.value = 900
+    const rlp = ctx.createBiquadFilter()
+    rlp.type = "lowpass"
+    rlp.frequency.value = 6500
+    this.rainGain = ctx.createGain()
+    this.rainGain.gain.value = 0
+    rain.connect(rhp).connect(rlp).connect(this.rainGain).connect(this.master)
+    rain.start(0, 2.1)
+
     // music bus: a dry path plus a soft feedback echo for space
     this.musicBus = ctx.createGain()
     this.musicBus.gain.value = this.musicEnabled ? 0.55 : 0
@@ -310,6 +329,17 @@ export class Ambience {
       }
     }
 
+    // rain
+    const rainAmt = s.rain ?? 0
+    this.rainGain!.gain.setTargetAtTime(rainAmt * 0.11, now, 1.2)
+    if (rainAmt > 0.2) {
+      this.dripTimer -= dt
+      if (this.dripTimer <= 0) {
+        this.dripTimer = 0.02 + Math.random() * 0.12 / rainAmt
+        this.burst(2500 + Math.random() * 4000, 0.002, 0.02, 0.006 * rainAmt, 3)
+      }
+    }
+
     // fire
     this.fireGain!.gain.setTargetAtTime(s.camping ? 0.05 : 0, now, 0.6)
     if (s.camping) {
@@ -324,7 +354,7 @@ export class Ambience {
     this.birdTimer -= dt
     if (this.birdTimer <= 0) {
       this.birdTimer = 3 + Math.random() * 9
-      if (s.night < 0.5) this.bird(1 - s.night * 2)
+      if (s.night < 0.5 && (s.rain ?? 0) < 0.3) this.bird(1 - s.night * 2)
     }
     this.cricketTimer -= dt
     if (this.cricketTimer <= 0) {

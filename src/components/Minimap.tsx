@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react"
 import type { Engine } from "@/game/engine"
 import { GROUND } from "@/game/groundMap"
 import { LANDMARKS } from "@/game/regions"
+import { loadSave } from "@/game/save"
 import { CASTLE_X, CASTLE_Z, PATH_START_Z, WATER_Y, lakeE, pathX } from "@/game/world"
 
 type RGB = [number, number, number]
@@ -120,6 +121,17 @@ export function Minimap(props: {
       g.fillRect(0, 0, cw, ch)
       g.drawImage(map, toX(GROUND.x0), toY(GROUND.z0), GROUND.w * scale, GROUND.h * scale)
 
+      // places Pell told you about, not yet found: a "?"
+      const flags = loadSave().flags
+      const hinted: Record<string, string> = { stones: "hint_stones", tower: "hint_tower", arch: "hint_arch" }
+      for (const l of LANDMARKS) {
+        if (engine.isFound(l.id) || !flags[hinted[l.id] ?? ""]) continue
+        g.font = "bold 13px 'Pixelify Sans', monospace"
+        g.fillStyle = "#08060e"
+        g.fillText("?", toX(l.x) - 3, toY(l.z) + 6)
+        g.fillStyle = "#fce060"
+        g.fillText("?", toX(l.x) - 4, toY(l.z) + 5)
+      }
       // landmarks you have found
       for (const l of LANDMARKS) {
         if (!engine.isFound(l.id)) continue
@@ -207,6 +219,8 @@ const ICONS: Record<string, string[]> = {
   fullscreen: ["XXX...XXX", "X.......X", "X.......X", ".........", ".........", ".........", "X.......X", "X.......X", "XXX...XXX"],
   eye: [".........", "...XXX...", ".XX...XX.", "X...X...X", "X..XXX..X", "X...X...X", ".XX...XX.", "...XXX...", "........."],
   close: ["XX.....XX", ".XX...XX.", "..XX.XX..", "...XXX...", "....X....", "...XXX...", "..XX.XX..", ".XX...XX.", "XX.....XX"],
+  book: ["XXXX.XXXX", "X..X.X..X", "X.XX.XX.X", "X..X.X..X", "X.XX.XX.X", "X..X.X..X", "XXXX.XXXX", ".XXXXXXX.", "........."],
+  talk: [".XXXXXXX.", "X.......X", "X.X.X.X.X", "X.......X", ".XXXXXXX.", "..XX.....", ".XX......", "X........", "........."],
   tower: ["X.X.X.X.X", "XXXXXXXXX", ".XXXXXXX.", ".XX.X.XX.", ".XXXXXXX.", ".XXXXXXX.", ".XXX.XXX.", ".XX...XX.", ".XX...XX."],
 }
 

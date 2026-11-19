@@ -78,6 +78,7 @@ uniform float uLakeFloor;
 uniform sampler2D uGroundMap; // R = horizon AO, G = baked prop shadows
 uniform vec4 uGroundRect;     // x0, z0, width, depth (m)
 uniform float uGroundOn;
+uniform vec4 uCourt;          // courtyard centre x, floor y, centre z, half-size
 
 ${COMMON}
 
@@ -94,6 +95,7 @@ float ridged(vec2 p){
   return s;
 }
 float terrain(vec2 p){
+  if (p.x > uCourt.x - 80.) return uCourt.y;
   float px = pathX(p.y);
   float d = abs(p.x - px);
   float h = terrainBase(p) + fbm2(p * 0.15 + vec2(5.3, 1.7));
@@ -155,6 +157,29 @@ float castleRaw(vec3 q){
   return d;
 }
 float castle(vec3 q){ return castleRaw(q / CSCALE) * CSCALE; }
+
+// the castle courtyard: walls, battlements, corner towers, the keep behind
+float courtyard(vec3 q){
+  float S = uCourt.w;
+  float d = max(sdBox(q - vec3(0., 6., 0.), vec3(S + 2., 6., S + 2.)), -sdBox(q - vec3(0., 6., 0.), vec3(S, 7., S)));
+  d = max(d, -sdBox(q - vec3(0., 3., S + 1.), vec3(2.6, 3.6, 3.)));
+  float cren = sdBox(vec3(mod(q.x, 2.) - 1., q.y - 12.6, abs(q.z) - S - 1.), vec3(.5, .6, 1.));
+  cren = min(cren, sdBox(vec3(abs(q.x) - S - 1., q.y - 12.6, mod(q.z, 2.) - 1.), vec3(1., .6, .5)));
+  d = min(d, cren);
+  vec3 c = vec3(abs(q.x) - S - 1., q.y, abs(q.z) - S - 1.);
+  d = min(d, sdCyl(c, 3.4, -1., 17.));
+  d = min(d, sdCyl(c, 4., 16., 18.));
+  d = min(d, sdSpire(c, 3.8, 18., 28.));
+  d = min(d, sdBox(q - vec3(0., 14., -S - 9.), vec3(12., 14., 7.)));
+  d = min(d, sdSpire(q - vec3(0., 0., -S - 9.), 9., 28., 40.));
+  vec3 g = q - vec3(-8., 0., -S - 10.);
+  d = min(d, sdCyl(g, 3., 0., 40.));
+  d = min(d, sdSpire(g, 3.6, 40., 56.));
+  vec3 g2 = q - vec3(9., 0., -S - 8.);
+  d = min(d, sdCyl(g2, 2.4, 0., 34.));
+  d = min(d, sdSpire(g2, 3., 34., 46.));
+  return d;
+}
 
 vec2 trees(vec3 p, float th){
   float best = 1e9, mat = 3.;
@@ -231,6 +256,10 @@ vec2 map(vec3 p){
   if (above < 8. && uSdfProps > .5){
     vec2 hs = houses(p, th);
     if (hs.x < res.x) res = hs;
+  }
+  if (p.x > uCourt.x - 70.){
+    float cy = courtyard(p - uCourt.xyz);
+    if (cy < res.x) res = vec2(cy, 5.);
   }
   if (uSdfCastle > .5){
     float c = castle(p - uCastle);
@@ -466,6 +495,12 @@ void main(){
       alb = mix(alb, rockc, rock);
       float snow = smoothstep(150., 200., p.y + vnoise(p.xz * .05) * 30.) * smoothstep(.5, .8, n.y);
       alb = mix(alb, vec3(.85, .86, .92), snow);
+      if (p.x > uCourt.x - 80.){
+        // flagstones across the whole courtyard
+        vec2 v = voronoi(p.xz * 1.1);
+        vec3 flag = mix(vec3(.46, .42, .5), vec3(.64, .58, .62), vnoise(p.xz * 3.1));
+        alb = mix(vec3(.2, .18, .24), flag, smoothstep(.05, .13, v.y - v.x));
+      }
       float pw = 1.5 + .8 * vnoise(p.xz * .6);
       if (d < pw + 1.){
         vec2 v = voronoi(p.xz * 1.5);
@@ -487,7 +522,8 @@ void main(){
       float course = step(.88, fract(q.y * 1.1));
       alb *= 1. - course * .25;
       if (q.y > 22. && n.y > .25) alb = vec3(.20, .21, .30);
-      emis = windows(q, n) * uWindowGlow;
+      // the courtyard walls are lit by lanterns, not the castle's window pattern
+      emis = p.x > uCourt.x - 80. ? 0. : windows(q, n) * uWindowGlow;
     } else if (mat < 6.5){
       float timber = step(.85, fract(p.y * 1.4)) + step(.9, fract((p.x + p.z) * .7));
       alb = mix(vec3(.80, .74, .62), vec3(.32, .22, .16), clamp(timber, 0., 1.) * .8);
@@ -802,7 +838,7 @@ precision highp float;
 out vec4 fragColor;
 uniform sampler2D uScene;
 uniform vec2 uLowRes, uOffset;
-uniform float uScale, uDither, uFade, uGrade;
+uniform float uScale, uDither, uFade, uGrade, uRain, uTime, uWind;
 uniform vec3 uPal[64];
 uniform int uPalN, uUsePal;
 
@@ -818,6 +854,15 @@ void main(){
   ivec2 lp = ivec2(floor((gl_FragCoord.xy - uOffset) / uScale));
   lp = clamp(lp, ivec2(0), ivec2(uLowRes) - 1);
   vec3 c = texelFetch(uScene, lp, 0).rgb;
+  // rain: falling streaks, one low-res pixel wide, leaning with the wind
+  if (uRain > 0.){
+    float colIdx = floor(float(lp.x) + float(lp.y) * .18 * uWind);
+    float h1 = fract(sin(colIdx * 12.9898) * 43758.5453);
+    float h2 = fract(sin(colIdx * 78.233) * 12345.678);
+    float period = 26. + h2 * 40.;
+    float y = mod(float(lp.y) + uTime * (110. + h1 * 70.) + h2 * 300., period);
+    if (h1 < uRain * .45 && y < 3.) c = mix(c, vec3(.72, .78, .94), .5 * uRain);
+  }
   // "toy" grade (after BRICKLAND): soft S-curve contrast, richer saturation,
   // and a smooth vignette, applied before the palette so it picks richer tones
   vec3 g = clamp(c, 0., 1.);

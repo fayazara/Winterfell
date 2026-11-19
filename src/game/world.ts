@@ -62,6 +62,10 @@ export function pathX(z: number) {
 export const CASTLE_Z = -190
 export const CASTLE_X = pathX(CASTLE_Z)
 
+/** The castle courtyard: its own small walled scene, far east of the valley. */
+export const COURT = { x: 900, z: 0, size: 22 }
+export const COURT_Y = 40
+
 /** A lake in the valley, left of the road (ellipse centre + radii, metres). */
 export const LAKE = { x: pathX(-42) - 34, z: -42, rx: 24, rz: 15 }
 
@@ -111,6 +115,7 @@ function valleyHeight(x: number, z: number) {
 export const LAKE_FLOOR = valleyHeight(LAKE.x, LAKE.z) - 3
 
 export function terrainHeight(x: number, z: number) {
+  if (x > COURT.x - 80) return COURT_Y
   let h = valleyHeight(x, z)
   // a flat lake bed with gentle banks rising to the natural ground
   h = lerp(h, LAKE_FLOOR, 1 - smoothstep(0.6, 1.25, lakeE(x, z)))

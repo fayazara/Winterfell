@@ -23,6 +23,8 @@ import { SKY_URL, buildAtlas, placeProps, type Atlas, type Prop } from "./props"
 import { GROUND, bakeAO, bakeHeights, bakeShadows, packGround } from "./groundMap"
 import { Ambience } from "./audio"
 import { DISCOVER_RADIUS, LANDMARKS, regionAt, type Landmark } from "./regions"
+import { COURT, HORSE_TALK, NPCS, type Action, type Ctx, type Npc } from "./npcs"
+import { loadSave, updateSave } from "./save"
 import { DAWN_ID, NIGHT_ID, PRESETS, type Environment, type Preset, type Tweaks } from "./presets"
 import {
   CASTLE_X,
@@ -30,6 +32,7 @@ import {
   CASTLE_Z,
   PATH_END_Z,
   PATH_START_Z,
+  COURT_Y,
   LAKE,
   LAKE_FLOOR,
   WATER_Y,
@@ -52,6 +55,10 @@ export interface Settings extends Tweaks {
   grade: boolean
   /** synthesised ambient sound */
   sound: boolean
+  /** time flows on its own: dawn, day, golden hour, dusk, night */
+  dayCycle: boolean
+  /** "auto" lets the sky decide */
+  weather: "auto" | "clear" | "rain" | "fog"
 }
 
 export interface EngineCallbacks {
@@ -73,6 +80,11 @@ export interface EngineCallbacks {
   /** everything has loaded: lift the intro */
   onReady?: () => void
   onPause?: (paused: boolean) => void
+  /** someone you can talk to is close (null when nobody is) */
+  onNear?: (npc: Npc | null) => void
+  /** a conversation begins */
+  onTalk?: (npc: Npc) => void
+  onCourtyard?: (inside: boolean) => void
 }
 
 type Prog = { p: WebGLProgram; u: Map<string, WebGLUniformLocation | null> }
@@ -81,6 +93,39 @@ const EYE = 1.72
 /** eye height in the saddle */
 const EYE_RIDING = 2.55
 const easeInOut = (t: number) => t * t * (3 - 2 * t)
+/** real seconds for one whole day */
+const DAY_SECONDS = 20 * 60
+/** hour → preset: the sky the day moves through */
+const DAY_KEYS: [number, string][] = [
+  [0, "starlit"], [4.6, "starlit"], [6, "morningmist"], [8.5, "valleyroad"], [14.5, "valleyroad"],
+  [16.5, "mistypeaks"], [18, "goldenhour"], [19.3, "violetdusk"], [20.8, "starlit"], [24, "starlit"],
+]
+const presetEnv = (id: string) => PRESETS.find((p) => p.id === id)!.env
+
+function mixEnv(a: Environment, b: Environment, t: number): Environment {
+  const out = {} as Record<string, unknown>
+  for (const key of Object.keys(b) as (keyof Environment)[]) {
+    const va = a[key]
+    const vb = b[key]
+    out[key] = Array.isArray(va) ? lerp3(va, vb as number[], t) : lerp(va as number, vb as number, t)
+  }
+  return out as unknown as Environment
+}
+
+/** The sky at a given hour, eased between the day's key presets. */
+function dayEnv(hour: number) {
+  const h = ((hour % 24) + 24) % 24
+  for (let i = 0; i < DAY_KEYS.length - 1; i++) {
+    const [h0, a] = DAY_KEYS[i]
+    const [h1, b] = DAY_KEYS[i + 1]
+    if (h >= h0 && h <= h1) {
+      const t = h1 > h0 ? (h - h0) / (h1 - h0) : 0
+      return mixEnv(presetEnv(a), presetEnv(b), t * t * (3 - 2 * t))
+    }
+  }
+  return presetEnv("starlit")
+}
+
 /** eye height sitting by the fire */
 const EYE_SITTING = 1.05
 const FIREFLIES = 180
@@ -206,6 +251,25 @@ export class Engine {
   private discovered = new Set<string>()
   private loaded = { hands: false, atlas: false, sky: false, ground: false }
   private readySent = false
+  // people
+  private npcProps = new Map<string, Prop>()
+  private nearNpc: Npc | null = null
+  private talking: Npc | null = null
+  private npcTimer = 0
+  private strangerGone = false
+  private inCourt = false
+  private teleport: { x: number; z: number; yaw: number; court: boolean } | null = null
+  // the day: 0..24 game hours; a whole day takes DAY_SECONDS of real time
+  private hour = 19.1
+  private campRush = false
+  private envCache: Environment | null = null
+  // weather: what it is, how strongly, and what is coming next
+  private wx: { kind: "clear" | "rain" | "fog"; amount: number; next: "clear" | "rain" | "fog"; at: number } = {
+    kind: "clear",
+    amount: 0,
+    next: "rain",
+    at: 21.5,
+  }
   private keys = new Set<string>()
   private fade = 0
   private looping = false
@@ -267,7 +331,7 @@ export class Engine {
     const p = PRESETS[0]
     this.envFrom = p.env
     this.envTo = p.env
-    this.settings = { pixelHeight: 400, ...p.tweaks, autoWalk: true, riding: false, grade: true, sound: this.audio.on }
+    this.settings = { pixelHeight: 400, ...p.tweaks, autoWalk: true, riding: false, grade: true, sound: this.audio.on, dayCycle: true, weather: "auto" }
     queueMicrotask(() => {
       this.cb.onSound?.(this.audio.on)
       this.cb.onMusic?.(this.audio.musicOn)
@@ -282,6 +346,16 @@ export class Engine {
 
     this.camY = terrainHeight(this.pos.x, this.pos.z) + EYE
     this.yaw = this.pathYaw(this.pos.z)
+    // playground aids: #hour=6.5 sets the clock, #wx=rain|fog|clear forces the weather
+    const hm = /hour=(-?[\d.]+)/.exec(window.location.hash)
+    if (hm) this.hour = Number(hm[1]) % 24
+    const wm = /wx=(rain|fog|clear)/.exec(window.location.hash)
+    if (wm) {
+      const kind = wm[1] as "rain" | "fog" | "clear"
+      this.settings.weather = kind
+      this.wx.kind = kind
+      this.wx.amount = kind === "clear" ? 0 : 1
+    }
     // playground aid: #cam=x,z,yawDegrees starts you standing there, free-looking
     const m = /cam=(-?[\d.]+),(-?[\d.]+)(?:,(-?[\d.]+))?/.exec(window.location.hash)
     if (m) {
@@ -290,7 +364,11 @@ export class Engine {
       this.pitch = -0.05
       this.camY = terrainHeight(this.pos.x, this.pos.z) + EYE
       this.settings.autoWalk = false
-      queueMicrotask(() => this.cb.onAutoWalk?.(false))
+      this.inCourt = this.pos.x > COURT.x - 80
+      queueMicrotask(() => {
+        this.cb.onAutoWalk?.(false)
+        if (this.inCourt) this.cb.onCourtyard?.(true)
+      })
     }
 
     this.resize()
@@ -334,9 +412,9 @@ export class Engine {
         this.atlas = atlas
         this.atlasTex = tex
         this.props = placeProps()
-        this.bbData = new Float32Array((this.props.length + 2) * BB_FLOATS)
-        this.propOrder = new Int32Array(this.props.length + 2)
-        this.propDist = new Float32Array(this.props.length + 2)
+        this.bbData = new Float32Array((this.props.length + 16) * BB_FLOATS)
+        this.propOrder = new Int32Array(this.props.length + 16)
+        this.propDist = new Float32Array(this.props.length + 16)
         this.markLoaded("atlas")
       })
       .catch((err) => {
@@ -389,6 +467,7 @@ export class Engine {
 
   setPreset(preset: Preset) {
     this.blendTo(preset.env, 2)
+    this.settings = { ...this.settings, dayCycle: false }
   }
 
   private blendTo(env: Environment, seconds: number) {
@@ -416,14 +495,26 @@ export class Engine {
       this.camping = true
       this.campTime = 0
       this.verseShown = false
-      this.blendTo(PRESETS.find((p) => p.id === NIGHT_ID)!.env, 14)
-      this.cb.onPreset?.(NIGHT_ID)
+      if (this.settings.dayCycle) this.campRush = true
+      else {
+        this.blendTo(PRESETS.find((p) => p.id === NIGHT_ID)!.env, 14)
+        this.cb.onPreset?.(NIGHT_ID)
+      }
     } else {
       this.camping = false
       this.cb.onVerse?.("Dawn comes up over the valley.\nThe road is still there.")
       this.dawnTimer = 5
-      this.blendTo(PRESETS.find((p) => p.id === DAWN_ID)!.env, 6)
-      this.cb.onPreset?.(DAWN_ID)
+      this.campRush = false
+      if (this.settings.dayCycle) {
+        // wake at first light
+        this.envFrom = this.currentEnv()
+        this.envT = 0
+        this.envDuration = 6
+        this.hour = 5.9
+      } else {
+        this.blendTo(PRESETS.find((p) => p.id === DAWN_ID)!.env, 6)
+        this.cb.onPreset?.(DAWN_ID)
+      }
     }
     this.cb.onCamp?.(on)
   }
@@ -448,6 +539,10 @@ export class Engine {
       found: this.discovered.size,
       total: LANDMARKS.length,
       paused: this.paused,
+      inCourt: this.inCourt,
+      clock: this.clock(),
+      hour: this.hour,
+      weather: this.weatherKind(),
     }
   }
 
@@ -507,6 +602,149 @@ export class Engine {
     }
   }
 
+  /** What a conversation needs to know about the world right now. */
+  dialogCtx(): Ctx {
+    const env = this.currentEnv()
+    return { save: loadSave(), night: env.stars, weather: this.weatherKind(), forecast: this.forecast(), riding: this.settings.riding }
+  }
+
+  /** Overridden by the weather system; clear skies until then. */
+  weatherKind(): Ctx["weather"] {
+    return this.wx.amount > 0.35 ? this.wx.kind : "clear"
+  }
+
+  forecast(): string {
+    const n = this.wx.next
+    const when = this.wx.at < 5 ? "before dawn" : this.wx.at < 12 ? "by morning" : this.wx.at < 18 ? "this afternoon" : "by evening"
+    if (this.wx.kind === "rain" && this.wx.amount > 0.3) return "it'll clear up " + when
+    return n === "rain" ? `rain ${when}` : n === "fog" ? `fog ${when}` : "clear skies for a while"
+  }
+
+  /** Begin talking to whoever is near (E). */
+  talk() {
+    const npc = this.nearNpc
+    if (!npc || this.talking) return
+    this.talking = npc
+    this.keys.clear()
+    if (document.pointerLockElement === this.canvas) document.exitPointerLock()
+    if (this.settings.autoWalk) this.setAutoWalk(false)
+    this.audio.cue("click")
+    this.cb.onTalk?.(npc)
+  }
+
+  endTalk() {
+    const npc = this.talking
+    this.talking = null
+    // recorded at the end, so a first conversation opens with a first greeting
+    if (npc)
+      updateSave((sv) => {
+        sv.met[npc.id] = (sv.met[npc.id] ?? 0) + 1
+      })
+  }
+
+  /** Things a conversation can make happen in the world. */
+  doAction(a: Action) {
+    if (a === "enterCourtyard") {
+      if (this.settings.riding) this.setRiding(false)
+      this.teleport = { x: COURT.x, z: COURT.z + COURT.size - 4, yaw: 0, court: true }
+      this.looping = true
+    } else if (a === "leaveCourtyard") {
+      const z = PATH_END_Z + 7
+      this.teleport = { x: pathX(z), z, yaw: Math.PI, court: false }
+      this.looping = true
+    } else if (a === "vanish") {
+      this.strangerGone = true
+    }
+  }
+
+  private npcVisible(n: Npc) {
+    if (n.place === "camp") return this.camping && this.campTime > 18 && !this.strangerGone && !!this.campProp
+    return true
+  }
+
+  /** Where each person is this frame (Pell walks; the stranger sits by your fire). */
+  private placeNpcs() {
+    for (const n of NPCS) {
+      if (!this.npcVisible(n)) {
+        this.npcProps.delete(n.id)
+        continue
+      }
+      let x = n.x
+      let z = n.z
+      if (n.walk) {
+        const span = Math.abs(n.walk.z1 - n.walk.z0)
+        // walk the road back and forth, pausing to talk while you do
+        const ph = (this.time * n.walk.speed) / span
+        const k = 0.5 - 0.5 * Math.cos(ph * Math.PI)
+        z = n.walk.z0 + (n.walk.z1 - n.walk.z0) * k
+        x = pathX(z) + n.walk.offset
+        const prev = this.npcProps.get(n.id)
+        if (this.talking?.id === n.id && prev) {
+          x = prev.x
+          z = prev.z
+          this.time -= 0 // conversation pauses nothing else
+        }
+      }
+      if (n.place === "camp" && this.campProp) {
+        const rx = Math.cos(this.yaw)
+        const rz = Math.sin(this.yaw)
+        x = this.campProp.x + rx * 1.9
+        z = this.campProp.z + rz * 1.9
+      }
+      const y = terrainHeight(x, z) - 0.1
+      const prop = this.npcProps.get(n.id)
+      if (prop) {
+        prop.x = x
+        prop.y = y
+        prop.z = z
+      } else this.npcProps.set(n.id, { x, y, z, h: n.h, key: n.key as Prop["key"], sway: 0, phase: 0 })
+    }
+  }
+
+  private findNear() {
+    let best: Npc | null = null
+    let bestD = Infinity
+    for (const n of NPCS) {
+      const p = this.npcProps.get(n.id)
+      if (!p) continue
+      const d = Math.hypot(p.x - this.pos.x, p.z - this.pos.z)
+      const reach = n.place === "camp" ? 4.5 : 4.2
+      if (d < reach && d < bestD) {
+        best = n
+        bestD = d
+      }
+    }
+    if (this.horseProp && !this.settings.riding && !this.camping) {
+      const d = Math.hypot(this.horseProp.x - this.pos.x, this.horseProp.z - this.pos.z)
+      if (d < 3.4 && d < bestD) best = { ...HORSE_TALK, name: loadSave().horse || "Your horse" }
+    }
+    if (best?.id !== this.nearNpc?.id || best?.name !== this.nearNpc?.name) {
+      this.nearNpc = best
+      this.cb.onNear?.(best)
+    }
+  }
+
+  /** Keep the player inside the valley (and out of the lake), or inside the courtyard walls. */
+  private bound(px: number, pz: number) {
+    if (this.inCourt) {
+      const lim = COURT.size - 1.6
+      this.pos.x = clamp(this.pos.x, COURT.x - lim, COURT.x + lim)
+      this.pos.z = clamp(this.pos.z, COURT.z - lim + 2, COURT.z + lim)
+      // the fountain in the middle
+      if (Math.hypot(this.pos.x - COURT.x, this.pos.z - COURT.z) < 2.6) {
+        this.pos.x = px
+        this.pos.z = pz
+      }
+      return
+    }
+    this.pos.x = clamp(this.pos.x, -160, 160)
+    this.pos.z = clamp(this.pos.z, -128, 90)
+    if (lakeE(this.pos.x, this.pos.z) < 1.02) {
+      this.pos.x = px
+      this.pos.z = pz
+    }
+  }
+
   get isCamping() {
     return this.camping
   }
@@ -516,6 +754,12 @@ export class Engine {
   }
 
   setSettings(s: Partial<Settings>) {
+    if (s.dayCycle === true && !this.settings.dayCycle) {
+      // smoothly hand the sky back to the clock
+      this.envFrom = this.currentEnv()
+      this.envT = 0
+      this.envDuration = 3
+    }
     const prevH = this.settings.pixelHeight
     this.settings = { ...this.settings, ...s }
     if (s.autoWalk === true) this.lookOffset = { yaw: 0, pitch: 0 }
@@ -531,6 +775,8 @@ export class Engine {
   private onKeyDown = (e: KeyboardEvent) => {
     const t = e.target as HTMLElement | null
     if (t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return
+    // while talking, keys belong to the conversation
+    if (this.talking) return
     if (["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
       e.preventDefault()
       if (this.settings.autoWalk) this.setAutoWalk(false)
@@ -543,7 +789,12 @@ export class Engine {
     if (this.paused) return
     if (e.code === "KeyR") this.setAutoWalk(!this.settings.autoWalk)
     if (e.code === "KeyH" && !this.camping) this.setRiding(!this.settings.riding)
-    if (e.code === "KeyC") this.setCamp(!this.camping)
+    if (e.code === "KeyE") {
+      this.talk()
+      return
+    }
+    if (this.talking) return
+    if (e.code === "KeyC" && !this.inCourt) this.setCamp(!this.camping)
     if (e.code === "KeyM") {
       this.audio.setEnabled(!this.audio.on)
       this.settings = { ...this.settings, sound: this.audio.on }
@@ -738,16 +989,85 @@ export class Engine {
   }
 
   private currentEnv(): Environment {
+    if (this.envCache) return this.envCache
     const t = this.envT * this.envT * (3 - 2 * this.envT)
-    const a = this.envFrom
-    const b = this.envTo
-    const out = {} as Record<string, unknown>
-    for (const key of Object.keys(b) as (keyof Environment)[]) {
-      const va = a[key]
-      const vb = b[key]
-      out[key] = Array.isArray(va) ? lerp3(va, vb as number[], t) : lerp(va as number, vb as number, t)
+    const target = this.settings.dayCycle ? dayEnv(this.hour) : this.envTo
+    const env = mixEnv(this.envFrom, target, t)
+    // weather leans on the sky: rain greys and dims it, fog thickens it
+    const w = this.wx.amount
+    if (this.wx.kind === "rain" && w > 0) {
+      const grey: [number, number, number] = [0.42, 0.44, 0.56]
+      env.sunColor = lerp3(env.sunColor, [env.sunColor[0] * 0.35, env.sunColor[1] * 0.37, env.sunColor[2] * 0.45], w)
+      env.ambient = lerp3(env.ambient, [env.ambient[0] * 0.85, env.ambient[1] * 0.88, env.ambient[2] * 0.95], w)
+      env.haze = lerp3(env.haze, grey, w * 0.7)
+      env.horizon = lerp3(env.horizon, grey, w * 0.6)
+      env.skyTop = lerp3(env.skyTop, [0.22, 0.23, 0.32], w * 0.6)
+      env.cloudLit = lerp3(env.cloudLit, [0.6, 0.6, 0.7], w * 0.7)
+      env.cloudShade = lerp3(env.cloudShade, [0.28, 0.28, 0.36], w * 0.7)
+      env.cloudCover = lerp(env.cloudCover, 0.95, w)
+      env.paintedSky *= 1 - w
+      env.stars *= 1 - w
+      env.fireflies *= 1 - w
+      env.cloudHi = lerp3(env.cloudHi, env.cloudLit, w)
+    } else if (this.wx.kind === "fog" && w > 0) {
+      env.cloudBand = lerp(env.cloudBand, 1.2, w)
+      env.haze = lerp3(env.haze, lerp3(env.cloudLit, env.haze, 0.5), w * 0.5)
+      env.stars *= 1 - w * 0.7
     }
-    return out as unknown as Environment
+    return env
+  }
+
+  /** Fog and mist after weather. */
+  private atmos() {
+    const w = this.wx.amount
+    const fogW = this.wx.kind === "fog" ? w : 0
+    const rainW = this.wx.kind === "rain" ? w : 0
+    return {
+      fog: this.settings.fog * (1 + fogW * 3.5) + rainW * 0.0025,
+      mist: this.settings.mist + fogW * 1.3 + rainW * 0.3,
+      rain: rainW,
+    }
+  }
+
+  /** Advance the clock and the weather. */
+  private tickSky(dt: number) {
+    if (this.settings.dayCycle) {
+      // resting makes the evening pass quickly, until it's properly night
+      const night = this.hour >= 21.5 || this.hour < 4
+      if (this.campRush && night) this.campRush = false
+      this.hour = (this.hour + dt * (this.campRush ? 0.55 : 24 / DAY_SECONDS)) % 24
+    }
+    const wx = this.wx
+    const forced = this.settings.weather
+    if (forced !== "auto") {
+      if (wx.kind !== forced) {
+        wx.amount = Math.max(0, wx.amount - dt / 6)
+        if (wx.amount === 0) wx.kind = forced
+      } else wx.amount = Math.min(forced === "clear" ? 0 : 1, wx.amount + dt / 12)
+      return
+    }
+    // the sky changes its mind every few hours
+    const due = ((this.hour - wx.at + 24) % 24) < 0.5 && wx.next !== wx.kind
+    if (due) {
+      wx.amount = Math.max(0, wx.amount - dt / 10)
+      if (wx.amount === 0) {
+        wx.kind = wx.next
+        const r = Math.random()
+        wx.next = wx.kind !== "clear" ? "clear" : r < 0.55 ? "rain" : "fog"
+        wx.at = (this.hour + (wx.kind === "clear" ? 3 + Math.random() * 4 : 1.2 + Math.random() * 1.8)) % 24
+      }
+    } else if (wx.kind !== "clear") wx.amount = Math.min(1, wx.amount + dt / 25)
+  }
+
+  /** Clock for the HUD, e.g. "18:40". */
+  clock() {
+    const h = Math.floor(this.hour)
+    const m = Math.floor((this.hour - h) * 60)
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`
+  }
+
+  setHour(h: number) {
+    this.hour = ((h % 24) + 24) % 24
   }
 
   private update(dt: number) {
@@ -766,6 +1086,12 @@ export class Engine {
       this.groundTimer = 0.35
       this.refreshGround()
     }
+    this.placeNpcs()
+    this.npcTimer -= dt
+    if (this.npcTimer <= 0) {
+      this.npcTimer = 0.2
+      this.findNear()
+    }
     const riding = s.riding
     this.mountT = clamp(this.mountT + (riding ? dt : -dt) / 0.9, 0, 1)
     this.campT = clamp(this.campT + (this.camping ? dt : -dt) / 1.6, 0, 1)
@@ -775,16 +1101,32 @@ export class Engine {
       if (this.dawnTimer <= 0) this.cb.onVerse?.(null)
     }
 
-    if (this.camping) {
+    if (this.talking) {
+      // stand still and turn to face whoever you're talking to
+      const p = this.talking.id === "horse" ? this.horseProp : this.npcProps.get(this.talking.id)
+      if (p) {
+        const want = Math.atan2(p.x - this.pos.x, -(p.z - this.pos.z))
+        let dy = want - (this.yaw + this.lookOffset.yaw)
+        dy = Math.atan2(Math.sin(dy), Math.cos(dy))
+        this.yaw += dy * (1 - Math.exp(-dt * 4))
+        this.pitch += (-0.02 - this.pitch) * (1 - Math.exp(-dt * 3))
+      }
+      if (this.camping) this.campTime += dt
+      if (this.settings.riding) this.rideSpeed *= Math.exp(-dt * 3)
+    } else if (this.camping) {
       // sit, look into the fire for a moment, then the view is yours
       this.campTime += dt
       if (this.campTime < 2) this.pitch += (-0.16 - this.pitch) * (1 - Math.exp(-dt * 3))
       if (!this.verseShown && this.campTime > 4) {
         this.verseShown = true
-        this.cb.onVerse?.(VERSES[this.verseIndex++ % VERSES.length])
+        const verse = VERSES[this.verseIndex++ % VERSES.length]
+        this.cb.onVerse?.(verse)
+        updateSave((sv) => {
+          if (!sv.verses.includes(verse)) sv.verses.push(verse)
+        })
       }
       if (this.verseShown && this.campTime > 16 && this.campTime - dt <= 16) this.cb.onVerse?.(null)
-    } else if (s.autoWalk) {
+    } else if (s.autoWalk && !this.inCourt) {
       if (riding) {
         this.rideSpeed += (4.2 - this.rideSpeed) * (1 - Math.exp(-dt * 1.5))
         speed = this.rideSpeed
@@ -795,7 +1137,8 @@ export class Engine {
         const target = this.pathYaw(this.pos.z)
         this.yaw += (target - this.yaw) * (1 - Math.exp(-dt * 1.2))
         this.pitch += (0.04 - this.pitch) * (1 - Math.exp(-dt * 1.5))
-        if (this.pos.z < PATH_END_Z) this.looping = true
+        // arrive at the gate and stop: Sir Hallan is waiting
+        if (this.pos.z < PATH_END_Z + 6) this.setAutoWalk(false)
       }
       // mouse look drifts back to the road
       const k = 1 - Math.exp(-dt * 0.6)
@@ -817,13 +1160,9 @@ export class Engine {
       const maxTurn = lerp(1.5, 0.75, smoothstep(4, 9.5, Math.abs(this.rideSpeed)))
       this.turnRate += (turn * maxTurn - this.turnRate) * (1 - Math.exp(-dt * 4))
       this.yaw += this.turnRate * dt
-      this.pos.x = clamp(this.pos.x + Math.sin(this.yaw) * this.rideSpeed * dt, -160, 160)
-      this.pos.z = clamp(this.pos.z - Math.cos(this.yaw) * this.rideSpeed * dt, -128, 90)
-      if (lakeE(this.pos.x, this.pos.z) < 1.02) {
-        this.pos.x = px
-        this.pos.z = pz
-        this.rideSpeed *= 0.3
-      }
+      this.pos.x += Math.sin(this.yaw) * this.rideSpeed * dt
+      this.pos.z -= Math.cos(this.yaw) * this.rideSpeed * dt
+      this.bound(px, pz)
       speed = Math.abs(this.rideSpeed)
     } else {
       const fwd = (this.keys.has("KeyW") || this.keys.has("ArrowUp") ? 1 : 0) - (this.keys.has("KeyS") || this.keys.has("ArrowDown") ? 1 : 0)
@@ -842,19 +1181,29 @@ export class Engine {
         const rz = Math.sin(this.yaw)
         this.pos.x += ((fx * fwd + rx * str) / len) * speed * dt
         this.pos.z += ((fz * fwd + rz * str) / len) * speed * dt
-        this.pos.x = clamp(this.pos.x, -160, 160)
-        this.pos.z = clamp(this.pos.z, -128, 90)
-        if (lakeE(this.pos.x, this.pos.z) < 1.02) {
-          this.pos.x = px
-          this.pos.z = pz
-        }
+        this.bound(px, pz)
       }
     }
 
     // loop the walk with a fade through black
     if (this.looping) {
       this.fade = Math.max(0, this.fade - dt / 1.2)
-      if (this.fade === 0) {
+      if (this.fade === 0 && this.teleport) {
+        const t = this.teleport
+        this.teleport = null
+        this.pos = { x: t.x, z: t.z }
+        this.yaw = t.yaw
+        this.lookOffset = { yaw: 0, pitch: 0 }
+        this.pitch = 0.02
+        this.camY = terrainHeight(t.x, t.z) + EYE
+        this.looping = false
+        if (t.court !== this.inCourt) {
+          this.inCourt = t.court
+          this.cb.onCourtyard?.(t.court)
+          if (t.court) this.audio.cue("discover")
+        }
+      } else if (this.fade === 0) {
+        this.inCourt = false
         this.pos.z = PATH_START_Z
         this.pos.x = pathX(PATH_START_Z)
         this.yaw = this.pathYaw(this.pos.z)
@@ -893,9 +1242,14 @@ export class Engine {
   private frame = (now: number) => {
     const dt = Math.min((now - this.last) / 1000, 0.05)
     this.last = now
-    if (!this.paused) this.update(dt)
+    this.envCache = null
+    if (!this.paused) {
+      this.tickSky(dt)
+      this.update(dt)
+    }
+    this.envCache = this.currentEnv()
     this.render()
-    const env = this.currentEnv()
+    const env = this.envCache
     if (!this.paused) this.audio.update(dt, {
       speed: this.settings.riding ? Math.abs(this.rideSpeed) : this.moving * (this.settings.autoWalk ? 1.5 : 2.2),
       riding: this.settings.riding && this.mountT > 0.5,
@@ -905,7 +1259,9 @@ export class Engine {
       camping: this.camping,
       night: env.stars,
       wind: this.settings.wind,
+      rain: this.wx.kind === "rain" ? this.wx.amount : 0,
     })
+    this.envCache = null
     this.fpsAcc.t += dt
     this.fpsAcc.n++
     if (this.fpsAcc.t > 0.5) {
@@ -919,7 +1275,7 @@ export class Engine {
   private fillBillboards(cam: number[], fwd: number[]) {
     const atlas = this.atlas!
     const props = this.props
-    const extras = [this.horseProp, this.campProp].filter((p): p is Prop => p !== null)
+    const extras = [this.horseProp, this.campProp, ...this.npcProps.values()].filter((p): p is Prop => p !== null)
     const total = props.length + extras.length
     const get = (i: number) => (i < props.length ? props[i] : extras[i - props.length])
     let n = 0
@@ -1071,8 +1427,9 @@ export class Engine {
     gl.uniform3fv(loc(gl, P, "uTorchPos"), torchPos)
     gl.uniform3fv(loc(gl, P, "uTorchColor"), torchColor)
     gl.uniform1f(loc(gl, P, "uTorch"), lightAmt)
-    gl.uniform1f(loc(gl, P, "uFog"), s.fog)
-    gl.uniform1f(loc(gl, P, "uMist"), s.mist)
+    const atm = this.atmos()
+    gl.uniform1f(loc(gl, P, "uFog"), atm.fog)
+    gl.uniform1f(loc(gl, P, "uMist"), atm.mist)
     gl.uniform1f(loc(gl, P, "uWind"), s.wind)
     gl.uniform1f(loc(gl, P, "uWindowGlow"), env.windowGlow)
     gl.uniform1f(loc(gl, P, "uTorchWorld"), torchWorld)
@@ -1099,6 +1456,7 @@ export class Engine {
     gl.uniform4f(loc(gl, P, "uLake"), LAKE.x, LAKE.z, LAKE.rx, LAKE.rz)
     gl.uniform1f(loc(gl, P, "uWaterY"), WATER_Y)
     gl.uniform1f(loc(gl, P, "uLakeFloor"), LAKE_FLOOR)
+    gl.uniform4f(loc(gl, P, "uCourt"), COURT.x, COURT_Y, COURT.z, COURT.size)
     gl.uniform4f(loc(gl, P, "uGroundRect"), GROUND.x0, GROUND.z0, GROUND.w, GROUND.h)
     gl.uniform1f(loc(gl, P, "uGroundOn"), this.groundTex ? 1 : 0)
     gl.activeTexture(gl.TEXTURE2)
@@ -1133,7 +1491,7 @@ export class Engine {
       gl.uniform1f(loc(gl, P, "uAspect"), w / h)
       gl.uniform1f(loc(gl, P, "uTime"), this.time)
       gl.uniform1f(loc(gl, P, "uWind"), s.wind)
-      gl.uniform1f(loc(gl, P, "uFog"), s.fog)
+      gl.uniform1f(loc(gl, P, "uFog"), atm.fog)
       gl.uniform1f(loc(gl, P, "uCloudBand"), env.cloudBand)
       gl.uniform1f(loc(gl, P, "uBandY"), CASTLE_Y - 6)
       gl.uniform3fv(loc(gl, P, "uTint"), propTint)
@@ -1234,6 +1592,9 @@ export class Engine {
     gl.uniform1f(loc(gl, P, "uScale"), scale)
     gl.uniform1f(loc(gl, P, "uDither"), s.dither)
     gl.uniform1f(loc(gl, P, "uGrade"), s.grade ? 1 : 0)
+    gl.uniform1f(loc(gl, P, "uRain"), atm.rain)
+    gl.uniform1f(loc(gl, P, "uTime"), this.time)
+    gl.uniform1f(loc(gl, P, "uWind"), s.wind)
     gl.uniform1f(loc(gl, P, "uFade"), this.fade)
     const pal = s.palette !== "off" ? PALETTES[s.palette] : undefined
     gl.uniform1i(loc(gl, P, "uUsePal"), pal ? 1 : 0)

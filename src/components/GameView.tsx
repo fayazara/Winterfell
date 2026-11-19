@@ -4,6 +4,10 @@ import { PRESETS } from "@/game/presets"
 import { PALETTES, type PaletteId } from "@/game/palettes"
 import type { Landmark } from "@/game/regions"
 import { Icon, Minimap } from "@/components/Minimap"
+import { Dialogue } from "@/components/Dialogue"
+import { Journal } from "@/components/Journal"
+import type { Npc } from "@/game/npcs"
+import { loadSave, onSaveChange } from "@/game/save"
 
 const initial: Settings = {
   pixelHeight: 400,
@@ -12,6 +16,8 @@ const initial: Settings = {
   riding: false,
   grade: true,
   sound: true,
+  dayCycle: true,
+  weather: "auto",
 }
 
 interface Toast {
@@ -114,6 +120,21 @@ export function GameView() {
   const [toast, setToast] = useState<Toast | null>(null)
   const [veil, setVeil] = useState<"loading" | "revealing" | "gone">("loading")
   const [stage, setStage] = useState("Waking the valley…")
+  const [near, setNear] = useState<Npc | null>(null)
+  const [talking, setTalking] = useState<Npc | null>(null)
+  const [journal, setJournal] = useState(false)
+  const [inCourt, setInCourt] = useState(false)
+  const [horse, setHorse] = useState(() => loadSave().horse)
+  const [hourView, setHourView] = useState(19.1)
+  useEffect(() => {
+    if (!panel) return
+    const id = setInterval(() => {
+      const h = engineRef.current?.status().hour
+      if (h !== undefined) setHourView(h)
+    }, 1000)
+    return () => clearInterval(id)
+  }, [panel])
+  useEffect(() => onSaveChange(() => setHorse(loadSave().horse)), [])
   const readings = useRef<HTMLDivElement>(null)
   const regionRef = useRef("")
 
@@ -146,6 +167,13 @@ export function GameView() {
         onDiscover: (l: Landmark, n: number, total: number) => {
           setFound({ n, total })
           showToast({ eyebrow: `Landmark found · ${n} of ${total}`, title: l.name, line: l.line }, 7000)
+        },
+        onNear: setNear,
+        onTalk: setTalking,
+        onCourtyard: (inside) => {
+          setInCourt(inside)
+          setMapOpen(false)
+          if (inside) showToast({ eyebrow: "You made it", title: "The Castle Courtyard", line: "The lamps are real. Somebody lights them." }, 6000)
         },
         onReady: () => {
           setVeil("revealing")
@@ -183,6 +211,8 @@ export function GameView() {
       set("[data-speed]", st.speed.toFixed(1))
       set("[data-x]", Math.round(st.x).toString())
       set("[data-z]", Math.round(-st.z).toString())
+      set("[data-clock]", st.clock)
+      set("[data-weather]", st.weather === "rain" ? "Rain" : st.weather === "fog" ? "Fog" : st.hour > 20.5 || st.hour < 5 ? "Night" : "Clear")
       const bar = el.querySelector<HTMLElement>("[data-bar]")
       if (bar) bar.style.transform = `scaleX(${Math.min(1, st.speed / 9.5)})`
     }, 100)
@@ -198,9 +228,11 @@ export function GameView() {
         setPanel((p) => !p)
       }
       if (e.code === "KeyV") setCinema((c) => !c)
+      if (e.code === "KeyJ") setJournal((j) => !j)
       if (e.code === "Escape") {
         setMapOpen(false)
         setHelp(false)
+        setJournal(false)
       }
     }
     window.addEventListener("keydown", onKey)
@@ -217,7 +249,7 @@ export function GameView() {
     if (!p) return
     setPresetId(id)
     engineRef.current?.setPreset(p)
-    update({ ...p.tweaks })
+    update({ ...p.tweaks, dayCycle: false })
   }
 
   const act = (fn: () => void) => () => {
@@ -267,7 +299,7 @@ export function GameView() {
         <div className="header-tools">
           <span className="hud-glass badge hud-part">
             <i className={paused ? "is-paused" : ""} />
-            {paused ? "Paused" : camping ? "Resting" : settings.riding ? "Riding" : "Wandering"}
+            {paused ? "Paused" : talking ? "Talking" : camping ? "Resting" : settings.riding ? `Riding${horse ? ` ${horse}` : ""}` : "Wandering"}
           </span>
           <nav className="hud-glass action-bar" aria-label="Tools">
             <ToolButton icon={paused ? "play" : "pause"} label={paused ? "Continue (Space)" : "Pause (Space)"} pressed={paused}
@@ -280,6 +312,7 @@ export function GameView() {
               onClick={act(() => update({ sound: !settings.sound }))} />
             <ToolButton icon="music" label={music ? "Music off" : "Music on"} pressed={!music}
               onClick={act(() => engineRef.current?.setMusic(!music))} />
+            <ToolButton icon="book" label="Journal (J)" pressed={journal} onClick={act(() => setJournal((j) => !j))} />
             <ToolButton icon="help" label="How to play" onClick={act(() => openHelp(true))} />
             <ToolButton icon="sliders" label="Tune the look (P)" pressed={panel} onClick={act(() => setPanel((p) => !p))} />
             <ToolButton icon="fullscreen" label="Fullscreen" onClick={act(fullscreen)} />
@@ -291,7 +324,10 @@ export function GameView() {
       {/* where you are */}
       <section className="hud-glass location-card hud-part" ref={readings} aria-label="Where you are">
         <div className="eyebrow">
-          NOW EXPLORING <span className="live-dot" />
+          NOW EXPLORING
+          <span className="sky-readout">
+            <b data-clock>--:--</b> · <span data-weather>Clear</span>
+          </span>
         </div>
         <h2>{region || "The Valley"}</h2>
         <div className="readings">
@@ -344,7 +380,7 @@ export function GameView() {
               ? "Look around freely · C to rise at dawn"
               : mode === "ride"
                 ? "Shift to gallop · H to dismount · R auto-ride"
-                : `${locked ? "Esc frees the mouse" : "Click to look"} · H horse · C camp · R auto-walk`}
+                : `${locked ? "Esc frees the mouse" : "Click to look"} · E talk · H horse · C camp · J journal`}
           </span>
         </span>
         <button type="button" className="text-button" onClick={act(() => openHelp(true))}>
@@ -352,10 +388,44 @@ export function GameView() {
         </button>
       </div>
 
-      <Minimap engine={engineRef} expanded={mapOpen} onToggle={() => {
-        engineRef.current?.uiCue()
-        setMapOpen((m) => !m)
-      }} />
+      {!inCourt ? (
+        <Minimap engine={engineRef} expanded={mapOpen} onToggle={() => {
+          engineRef.current?.uiCue()
+          setMapOpen((m) => !m)
+        }} />
+      ) : null}
+
+      {near && !talking ? (
+        <div className="hud-glass talk-prompt hud-part">
+          <kbd>E</kbd>
+          <span>
+            {near.id === "horse" ? `Tend to ${horse || "your horse"}` : `Talk to ${near.name}`}
+            <i>{near.id === "horse" ? "" : near.title}</i>
+          </span>
+        </div>
+      ) : null}
+
+      {talking ? (
+        <Dialogue
+          key={talking.id}
+          npc={talking}
+          ctx={() => engineRef.current!.dialogCtx()}
+          onCue={() => engineRef.current?.uiCue()}
+          onAction={(a) => engineRef.current?.doAction(a)}
+          onClose={() => {
+            setTalking(null)
+            engineRef.current?.endTalk()
+          }}
+        />
+      ) : null}
+
+      {journal ? (
+        <Journal
+          isFound={(id) => engineRef.current?.isFound(id) ?? false}
+          onCue={() => engineRef.current?.uiCue()}
+          onClose={() => setJournal(false)}
+        />
+      ) : null}
 
       {toast ? (
         <div key={toast.id} className="hud-glass hud-toast hud-part" role="status">
@@ -387,6 +457,8 @@ export function GameView() {
               <Row k={<kbd>H</kbd>} v="Mount / dismount your horse" />
               <Row k={<><kbd>Shift</kbd> on horseback</>} v="Gallop" />
               <Row k={<kbd>R</kbd>} v="Auto-walk / auto-ride the road" />
+              <Row k={<kbd>E</kbd>} v="Talk to people · tend to your horse" />
+              <Row k={<kbd>J</kbd>} v="Your journal" />
               <Row k={<kbd>C</kbd>} v="Make camp · rest until dawn" />
               <Row k={<kbd>Space</kbd>} v="Pause" />
               <Row k={<kbd>M</kbd>} v="Sound on / off" />
@@ -441,6 +513,27 @@ export function GameView() {
                 <option key={id} value={id}>{p.name}</option>
               ))}
               <option value="off">Off (raw)</option>
+            </select>
+          </label>
+          <Check label="Day cycle (20 min days)" checked={settings.dayCycle} onChange={(v) => update({ dayCycle: v })} />
+          <Slider label="Time of day" value={hourView} min={0} max={23.9} step={0.1}
+            display={`${String(Math.floor(hourView)).padStart(2, "0")}:${String(Math.floor((hourView % 1) * 60)).padStart(2, "0")}`}
+            onChange={(v) => {
+              setHourView(v)
+              engineRef.current?.setHour(v)
+              if (!settings.dayCycle) update({ dayCycle: true })
+            }} />
+          <label className="mt-2 flex items-center justify-between gap-2">
+            <span>Weather</span>
+            <select
+              value={settings.weather}
+              onChange={(e) => update({ weather: e.target.value as Settings["weather"] })}
+              className="border border-[#2e2a5c] bg-[#171530] px-1 py-0.5 text-xs"
+            >
+              <option value="auto">Let the sky decide</option>
+              <option value="clear">Clear</option>
+              <option value="rain">Rain</option>
+              <option value="fog">Fog</option>
             </select>
           </label>
           <Check label="Toy colour grade" checked={settings.grade} onChange={(v) => update({ grade: v })} />

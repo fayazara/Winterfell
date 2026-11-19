@@ -2,7 +2,7 @@
  * Named places in the valley and landmarks to discover — the gentle
  * "what's over there?" pull BRICKLAND gets from its biomes and its sun gate.
  */
-import { CASTLE_X, CASTLE_Z, lakeE, pathX } from "./world"
+import { CASTLE_X, CASTLE_Z, COURT, lakeE, pathX } from "./world"
 
 export interface Landmark {
   id: string
@@ -33,6 +33,7 @@ export const LANDMARKS: Landmark[] = [
 export const DISCOVER_RADIUS = 10
 
 export function regionAt(x: number, z: number) {
+  if (x > COURT.x - 80) return "The Castle Courtyard"
   if (Math.hypot(x - CASTLE_X, z - CASTLE_Z) < 75) return "The Crag of Spires"
   if (lakeE(x, z) < 1.7) return "Stillwater Mere"
   const d = Math.abs(x - pathX(z))
